@@ -8,15 +8,14 @@ production security guarantee.
 
 ## Reporting a vulnerability
 
-Please use this repository's GitHub private vulnerability reporting feature when it is enabled.
+Please use [GitHub private vulnerability reporting](https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/security/advisories/new).
 Do not open a public issue for a suspected vulnerability. Do not include passwords, verification
 codes, cookies, account identifiers, reminder contents, signed URLs or private encryption keys.
 Use invented data in reproduction steps.
 
 Include the affected route or MCP tool, expected boundary, impact, deployment mode and a minimal
 reproduction. If private reporting is not available, request a private reporting channel from the
-maintainer without disclosing the vulnerability publicly. Private reporting must be enabled when
-the repository is published; this document does not enable it or promise a response SLA.
+maintainer without disclosing the vulnerability publicly. This policy does not promise a response SLA.
 
 ## Deployment responsibility
 

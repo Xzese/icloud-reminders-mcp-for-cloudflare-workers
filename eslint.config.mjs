@@ -9,6 +9,9 @@ const eslintConfig = defineConfig([
   globalIgnores([
     // Default ignores of eslint-config-next:
     ".next/**",
+    ".vinext/**",
+    ".wrangler/**",
+    "dist/**",
     "out/**",
     ".sites-runtime/**",
     "work/**",
@@ -16,6 +19,15 @@ const eslintConfig = defineConfig([
     "scripts/build/**",
     "next-env.d.ts",
   ]),
+  {
+    files: ["tests/**/*.{ts,mjs}"],
+    rules: {
+      // Synthetic transport/database doubles implement only the exercised
+      // contract, including the receiver captured by prepared statements.
+      "@typescript-eslint/no-explicit-any": "off",
+      "@typescript-eslint/no-this-alias": "off",
+    },
+  },
   {
     files: ["src/components/ui/**/*.{ts,tsx}", "src/hooks/use-mobile.ts"],
     rules: {

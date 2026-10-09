@@ -18,7 +18,9 @@ Use the title **iCloud Reminders MCP Server for Cloudflare Workers** and a repos
 `icloud-reminders-mcp-for-cloudflare-workers`. The repository is MIT-licensed; preserve the
 reference and vendored notices. Enable GitHub private vulnerability reporting after publication,
 enable branch protection/required CI checks, and keep production secrets out of GitHub Actions.
-Dependabot is configured for weekly review; automatic merging is not configured.
+Dependabot is configured for weekly review. Auto-merge is available as an explicit choice on each
+PR and waits for all four required CI checks and resolved conversations. Merged head branches are
+deleted automatically; dependency updates are not opted into auto-merge by a workflow.
 
 ## Updating a private ChatGPT Site
 

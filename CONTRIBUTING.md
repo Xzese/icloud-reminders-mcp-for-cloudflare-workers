@@ -27,6 +27,7 @@ not source artifacts.
 Before opening a pull request, run:
 
 ```bash
+npm run lint
 npm run typecheck
 npm test
 npm run build
@@ -63,6 +64,14 @@ Keep changes narrow, explain the user impact and describe the checks you ran. Ad
 behaviour changes using synthetic inputs. Do not include reminder contents, account identifiers,
 passwords, tokens, signed asset links, private screenshots or generated deployment configuration.
 Report suspected vulnerabilities privately as described in SECURITY.md rather than a public issue.
+
+The four required CI checks cover lint/types/unit tests, the Sites Worker and local transport,
+the standalone Cloudflare Worker, and public configuration/full-history secret scanning.
+They use synthetic inputs and require no Apple or deployment secrets. Keep each check passing
+and resolve review conversations before merging. You can select **Enable auto-merge** on a PR
+to merge after those requirements pass; it is an explicit choice for each PR. Merged head branches
+are deleted automatically. Dependabot proposes weekly updates for review and does not merge them
+automatically.
 
 Preserve upstream attribution and license notices when changing protocol or vendored code.
 Fixture regeneration is optional: the checked-in vectors in `tests/fixtures/` are sufficient to run CI. To regenerate,

@@ -20,7 +20,7 @@ export async function appleAuthSocket(request: Request, env: RuntimeEnv, owner: 
   const [client, server] = Object.values(new WebSocketPair());
   const abort = new AbortController(); const nonce = hex(crypto.getRandomValues(new Uint8Array(32)));
   let phase: "start" | "waiting" | "busy" | "complete" | "closed" = "start";
-  let sequence = 0; let serverSequence = 0; let messages = 0; let timer: ReturnType<typeof setTimeout>;
+  let sequence = 0; let serverSequence = 0; let messages = 0;
   const send = (value: object) => server.send(JSON.stringify({ ...value, direction: "server", transactionId: fence.transactionId, nonce, sequence: serverSequence++ }));
   const closed = () => phase === "closed";
   const flow = new AppleSignInFlow(new AppleAuthHTTP(undefined, undefined, abort.signal), abort.signal, async (session, result) => {
@@ -68,7 +68,7 @@ export async function appleAuthSocket(request: Request, env: RuntimeEnv, owner: 
       } else { phase = "waiting"; send(result); }
     })().catch(fail);
   });
-  timer = setTimeout(() => fail(new AppError("AUTH_EXPIRED", "Sign-in exceeded its interactive lifetime. Restart sign-in; a stored checkpoint cannot restore the socket.", 409)), Math.max(1, fence.expiresAt - Date.now()));
+  const timer = setTimeout(() => fail(new AppError("AUTH_EXPIRED", "Sign-in exceeded its interactive lifetime. Restart sign-in; a stored checkpoint cannot restore the socket.", 409)), Math.max(1, fence.expiresAt - Date.now()));
   send({ type: "hello", generation: fence.generation, expiresAt: fence.expiresAt, lifetimeMs: AUTH_LIFETIME_MS });
   return new Response(null, { status: 101, webSocket: client, headers: { "sec-websocket-protocol": APPLE_AUTH_PROTOCOL, "cache-control": "private, no-store" } });
 }

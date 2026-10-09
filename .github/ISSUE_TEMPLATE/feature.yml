@@ -1,0 +1,17 @@
+name: Feature request
+description: Suggest an improvement to setup, the dashboard or MCP tools.
+title: "[Feature]: "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: Describe the user outcome and any alternatives. Keep examples free of private account data.
+    validations:
+      required: true

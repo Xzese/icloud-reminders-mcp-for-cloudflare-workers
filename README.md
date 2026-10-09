@@ -1,6 +1,7 @@
 # iCloud Reminders MCP Server for Cloudflare Workers
 
 <p align="center">
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/actions/workflows/ci.yml"><img src="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://workers.cloudflare.com"><img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare Workers"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
 </p>
@@ -101,6 +102,8 @@ accepting a controlled account test. Reminder mutations stay disabled even when 
 Use Node.js **24 or later**, npm and the locked dependencies:
 
 ```bash
+git clone https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers.git
+cd icloud-reminders-mcp-for-cloudflare-workers
 npm run install:ci
 node scripts/setup/create-local-env.mjs
 npm run build
