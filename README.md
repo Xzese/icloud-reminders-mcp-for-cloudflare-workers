@@ -319,11 +319,11 @@ no field projection is sent because support for `desiredKeys` on this special qu
 Extra returned fields are discarded from summaries. Empty lists are retained; MCP list results and
 all-open selection exclude deleted lists and groups. Shared-database lists are not discovered.
 
-**Live-account completeness is not verified.** The [pinned external reference](https://github.com/fineyh/icloud-reminders-desktop/blob/3dbbbed9eef3d2f3a6d13be28475c2d4585504a0/src/backend/reminders_api.py)
-uses `Lists` but does not validate pagination, old/empty lists or shared-list completeness. Our
-synthetic tests establish parser and control-flow behavior, not Apple's current account behavior.
-Direct mode must remain opt-in until an explicitly approved account test compares a complete list
-set, including old, empty, renamed and deleted lists, with Apple's UI. See
+**Live validation is limited to one account.** An approved local test on 2026-10-09 returned the
+owner's three expected lists, picked up a new list and removed it after deletion, with zero change
+calls. Live pagination, groups, renamed/old/empty-list coverage and shared-list completeness remain
+unverified, so direct mode stays opt-in. The [pinned external reference](https://github.com/fineyh/icloud-reminders-desktop/blob/3dbbbed9eef3d2f3a6d13be28475c2d4585504a0/src/backend/reminders_api.py)
+supports the request format, while synthetic tests cover parsing and bounded continuation handling. See
 [discovery evidence and validation procedure](docs/direct-list-retrieval.md).
 
 Each direct refresh is bounded to 25 query pages, 20 seconds, 1,000 identifiers and a 1 MiB summary

@@ -4,8 +4,9 @@
 
 Direct discovery is **experimental and disabled by default**. Select it explicitly with
 `REMINDERS_LIST_DISCOVERY=direct`; omit the setting or use `legacy` for the existing scanner.
-No production deployment or live Apple test was performed for this change. The primary objective
-of verified complete live-account list retrieval remains open.
+An explicitly approved local read-only test verified the expected list set, creation and deletion
+on one live account on 2026-10-09. No production deployment or session reset was performed.
+Broader completeness remains unverified, including live pagination, groups and shared lists.
 
 The implementation was developed from the latest `main`, independently of the open reminder-write
 PR. It adds no mutation tools and does not change write permissions or the 24-hour session lifetime.
@@ -65,6 +66,32 @@ Direct mode suppresses the background historical scanner. Explicit legacy diagno
 available, and configured local/cron legacy runners retain checkpoints/backoff. Sites does not
 provision a recurring trigger. Authentication, Access/Sites identity, origin checks, AES-256-GCM,
 generation/version fencing, read leases, absolute expiry and disconnect invalidation are unchanged.
+
+## Approved local live validation
+
+On 2026-10-09, the account owner explicitly approved local read-only validation and supplied an
+inventory of three existing lists from Apple Reminders. A separate encrypted local connection used
+direct discovery without historical scanning. The owner then created and deleted a test list in
+Apple's UI; the server made no mutations. Names, identifiers, credentials and tokens are omitted
+from this evidence.
+
+| Check | Active lists | Deleted records | Query pages | Zone discovery calls | Change calls | Elapsed |
+| --- | --- | --- | --- | --- | --- | --- |
+| Initial retrieval | 3 | 9 | 1 | 1 | 0 | 1,064.93 ms |
+| After creation | 4 | 9 | 1 | 0 | 0 | 1,473.43 ms |
+| After deletion | 3 | 10 | 1 | 0 | 0 | 825.86 ms |
+
+Every retrieval returned HTTP 200, singular `List` records, no record errors and no continuation.
+The initial and final active sets matched the owner's inventory, allowing capitalization differences;
+the creation result retained all three originals and added one list. Deleted records were filtered
+from selectable lists. These are individual measured local service calls including Apple/network
+latency, not repeated benchmarks or a measured live comparison with the old implementation.
+
+This verifies existing-list discovery and creation/deletion freshness for this account. It does not
+verify live multi-page continuation, renamed lists, group handling, shared-database coverage or
+other accounts. List emptiness and age were not independently inspected. Known-list and all-open
+live reads were not part of this test. Keep direct discovery opt-in pending those remaining checks;
+the capability flag still represents broader completeness, not this limited validation.
 
 ## Measured synthetic comparison
 

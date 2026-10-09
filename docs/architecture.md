@@ -46,7 +46,9 @@ read leases, version/generation fences and absolute expiry checks on commit.
 Direct mode suppresses the optional background scanner. Legacy scheduled events reuse the fenced
 catalogue operation only when a runner is configured. Neither a background-handler declaration nor
 browser polling provisions a recurring trigger. Dashboard polling reads saved state only. Direct
-list discovery is synthetic-tested, not live-validated; shared database completeness is unknown.
+list discovery has synthetic coverage and an approved one-account live test of existing lists and
+creation/deletion freshness. Live pagination, groups and shared database completeness remain unknown;
+direct mode stays opt-in.
 See [direct discovery evidence](direct-list-retrieval.md).
 
 The provenance directory preserves upstream references and licenses. Checked-in synthetic fixtures
