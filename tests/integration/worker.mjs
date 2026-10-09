@@ -80,6 +80,7 @@ try {
   const tools = await mcp("tools/list", {}); assert.deepEqual(tools.result.tools.map((t) => t.name).sort(), ["complete_reminder", "connection_status", "create_reminder", "delete_reminder", "get_all_open_reminders", "get_reminder", "get_reminder_lists", "get_reminders", "reopen_reminder", "update_reminder"]);
   const gatedRead = await mcp("tools/call", { name: "get_reminders", arguments: { listId: "List/NEW" } }); assert.equal(gatedRead.result.isError, true);
   const call = await mcp("tools/call", { name: "connection_status", arguments: {} }); assert.equal(call.result.structuredContent.connected, false);
+  assert.deepEqual(JSON.parse(call.result.content[0].text), call.result.structuredContent);
   const removed = await mcp("tools/call", { name: "feasibility_status", arguments: {} }); assert.equal(removed.result.isError, true);
   const gatedAll = await mcp("tools/call", { name: "get_all_open_reminders", arguments: {} }); assert.equal(gatedAll.result.isError, true);
   assert.equal((await request("/mcp", { user: "wrong-owner", method: "POST", body: { jsonrpc: "2.0", id: 1, method: "tools/list" } })).status, 403);
@@ -324,6 +325,7 @@ try {
     assert.equal(response.status, 200, await response.clone().text()); await response.text();
   };
   const waitingStatus = await mcp("tools/call", { name: "connection_status", arguments: {} });
+  assert.deepEqual(JSON.parse(waitingStatus.result.content[0].text), waitingStatus.result.structuredContent);
   assert.equal(waitingStatus.result.structuredContent.capabilities.listReminders, true);
   assert.equal(syncScenario.requests.length, 0, "Connection status does not initiate Apple reads.");
   const initialPause = await request("/api/apple/read", { method: "POST", body: { action: "catalogue-auto", expectedGeneration: empty.generation, enabled: false } }); assert.equal(initialPause.status, 200);

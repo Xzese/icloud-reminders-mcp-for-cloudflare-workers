@@ -2,6 +2,7 @@
 // Every outbound request is intercepted here; no Apple account or network is used.
 import assert from "node:assert/strict";
 import { Miniflare } from "miniflare";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv-provider.js";
 import { readFile } from "node:fs/promises";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -131,7 +132,7 @@ export async function verifyReminderWrites(options) {
         const operation = body.operations[0];
         assert.equal(body.operations.length, 1, "Each controlled action sends one exact reminder write.");
         assert.equal(operation.record.recordType, "Reminder");
-        state.modifies.push({ operationType: operation.operationType, recordName: operation.record.recordName, fields: Object.keys(operation.record.fields).sort() });
+        state.modifies.push({ operationType: operation.operationType, recordName: operation.record.recordName, recordChangeTag: operation.record.recordChangeTag, fields: Object.keys(operation.record.fields).sort() });
         const action = state.nextModify;
         state.nextModify = null;
         if (action === "redirect-307") return new Response(null, { status: 307, headers: { location: request.url } });
@@ -181,10 +182,22 @@ export async function verifyReminderWrites(options) {
         .bind(JSON.stringify(envelope), owner).run();
       return generation;
     };
+    const outputValidators = new Map();
+    const jsonSchemaValidator = new AjvJsonSchemaValidator();
     const mcp = async (method, params) => {
       const response = await request("/mcp", { method: "POST", body: { jsonrpc: "2.0", id: randomUUID(), method, params } });
       const value = await response.json();
       assert.equal(response.status, 200, JSON.stringify(value));
+      if (method === "tools/list") for (const tool of value.result.tools) {
+        assert.equal(tool.outputSchema.type, "object");
+        assert.equal(tool.outputSchema.additionalProperties, false);
+        outputValidators.set(tool.name, jsonSchemaValidator.getValidator(tool.outputSchema));
+      }
+      if (method === "tools/call" && value.result?.structuredContent) assert.deepEqual(JSON.parse(value.result.content[0].text), value.result.structuredContent);
+      if (method === "tools/call" && !value.result?.isError && outputValidators.has(params.name)) {
+        const validated = outputValidators.get(params.name)(value.result.structuredContent);
+        assert.equal(validated.valid, true, validated.errorMessage);
+      }
       return value;
     };
     return { worker, db, state, request, seedReady, mcp };
@@ -231,11 +244,17 @@ export async function verifyReminderWrites(options) {
     const createTool = tools.find(tool => tool.name === "create_reminder");
     const updateTool = tools.find(tool => tool.name === "update_reminder");
     assert.deepEqual({ readOnly: createTool.annotations.readOnlyHint, destructive: createTool.annotations.destructiveHint, idempotent: createTool.annotations.idempotentHint }, { readOnly: false, destructive: false, idempotent: true });
-    assert.deepEqual({ readOnly: updateTool.annotations.readOnlyHint, destructive: updateTool.annotations.destructiveHint, idempotent: updateTool.annotations.idempotentHint }, { readOnly: false, destructive: true, idempotent: false });
+    assert.deepEqual({ readOnly: updateTool.annotations.readOnlyHint, destructive: updateTool.annotations.destructiveHint, idempotent: updateTool.annotations.idempotentHint }, { readOnly: false, destructive: true, idempotent: true });
     for (const name of ["complete_reminder", "reopen_reminder", "delete_reminder"]) {
       const annotations = tools.find(tool => tool.name === name).annotations;
-      assert.deepEqual([annotations.readOnlyHint, annotations.destructiveHint, annotations.idempotentHint], [false, true, false]);
+      assert.deepEqual([annotations.readOnlyHint, annotations.destructiveHint, annotations.idempotentHint], [false, true, true]);
     }
+    for (const tool of tools) for (const parameter of Object.values(tool.inputSchema.properties ?? {})) {
+      assert.ok(parameter.description?.length > 0, `${tool.name} must describe each parameter in tools/list.`);
+    }
+    for (const parameter of Object.values(updateTool.inputSchema.properties.changes.properties)) assert.ok(parameter.description?.length > 0);
+    const status = await mcp("tools/call", { name: "connection_status", arguments: {} });
+    assert.equal(status.result.structuredContent.generation, generation);
 
     const createKey = "46cf8eef-6cab-4aa2-a725-219769337d8b";
     const createArgs = { listId, idempotencyKey: createKey, title: "Café 🧭 — 東京", notes: "Keep this note 🌿", priority: 1, flagged: true };
@@ -249,6 +268,13 @@ export async function verifyReminderWrites(options) {
     assert.equal(state.modifies[0].recordName, `Reminder/${createKey.toUpperCase()}`);
     assert.ok(!JSON.stringify(created).includes(opaqueMetadata));
     assert.ok(!JSON.stringify(created).includes("synthetic-private-owner"));
+    const validateCreate = new AjvJsonSchemaValidator().getValidator(createTool.outputSchema);
+    const exposedRaw = structuredClone(created.result.structuredContent);
+    exposedRaw.record.raw = { private: opaqueMetadata };
+    assert.equal(validateCreate(exposedRaw).valid, false, "The public contract must reject raw Apple metadata.");
+    const missingTag = structuredClone(created.result.structuredContent);
+    delete missingTag.record.recordChangeTag;
+    assert.equal(validateCreate(missingTag).valid, false, "The mutation contract must declare its returned version token.");
 
     const replay = await mcp("tools/call", { name: "create_reminder", arguments: createArgs });
     assert.equal(replay.result.structuredContent.replayed, true);
@@ -283,6 +309,10 @@ export async function verifyReminderWrites(options) {
     assert.equal(staleResponse.status, 409);
     assert.equal((await staleResponse.json()).error.code, "CONFLICT");
     assert.equal(state.modifies.length, modifyCountAfterEdit, "A stale change tag must fail before modify.");
+    const identicalEditArgs = { listId, reminderId, recordChangeTag: oldTag, changes: editBody.changes, expectedGeneration: generation };
+    const identicalEdit = await mcp("tools/call", { name: "update_reminder", arguments: identicalEditArgs });
+    assert.equal(identicalEdit.result.structuredContent.error.code, "CONFLICT");
+    assert.equal(state.modifies.length, modifyCountAfterEdit, "Identical MCP edit replay must not send another modify.");
     const unpinnedResponse = await request("/api/mutations", { method: "POST", body: { action: "update", listId, reminderId, recordChangeTag: edited.record.recordChangeTag, changes: { title: "Missing generation" } } });
     assert.equal(unpinnedResponse.status, 400);
     assert.equal(state.modifies.length, modifyCountAfterEdit);
@@ -313,6 +343,16 @@ export async function verifyReminderWrites(options) {
     const firstTarget = lifecycleTarget();
     const completeReply = await mcp("tools/call", { name: "complete_reminder", arguments: firstTarget });
     assert.equal(completeReply.result.structuredContent.record.completed, true);
+    const repeatLifecycle = async (name, args) => {
+      const before = structuredClone(state.records.get(args.reminderId));
+      const count = state.modifies.length;
+      const repeat = await mcp("tools/call", { name, arguments: args });
+      assert.equal(repeat.result.isError, true);
+      assert.equal(repeat.result.structuredContent.error.code, "CONFLICT");
+      assert.equal(state.modifies.length, count, `Identical ${name} replay must not submit another write.`);
+      assert.deepEqual(state.records.get(args.reminderId), before);
+    };
+    await repeatLifecycle("complete_reminder", firstTarget);
     const completedLookup = await mcp("tools/call", { name: "get_reminder", arguments: { listId, reminderId: lifecycleId } });
     assert.equal(completedLookup.result.structuredContent.record.completed, true);
     assert.ok(!JSON.stringify(completedLookup).includes(opaqueMetadata));
@@ -322,13 +362,17 @@ export async function verifyReminderWrites(options) {
     assert.equal(state.records.get(lifecycleId).fields.NotesDocument.value, originalLifecycle.fields.NotesDocument.value);
     const staleDelete = await mcp("tools/call", { name: "delete_reminder", arguments: firstTarget });
     assert.equal(staleDelete.result.structuredContent.error.code, "CONFLICT");
-    const reopenReply = await mcp("tools/call", { name: "reopen_reminder", arguments: lifecycleTarget() });
+    const reopenTarget = lifecycleTarget();
+    const reopenReply = await mcp("tools/call", { name: "reopen_reminder", arguments: reopenTarget });
     assert.equal(reopenReply.result.structuredContent.record.completed, false);
     assert.equal(reopenReply.result.structuredContent.record.completedDate, null);
+    await repeatLifecycle("reopen_reminder", reopenTarget);
     await mcp("tools/call", { name: "complete_reminder", arguments: lifecycleTarget() });
-    const deleteReply = await mcp("tools/call", { name: "delete_reminder", arguments: lifecycleTarget() });
+    const deleteTarget = lifecycleTarget();
+    const deleteReply = await mcp("tools/call", { name: "delete_reminder", arguments: deleteTarget });
     assert.equal(deleteReply.result.structuredContent.record.deleted, true);
     assert.equal(deleteReply.result.structuredContent.record.completed, true);
+    await repeatLifecycle("delete_reminder", deleteTarget);
     const deletedLookup = await mcp("tools/call", { name: "get_reminder", arguments: { listId, reminderId: lifecycleId } });
     assert.equal(deletedLookup.result.structuredContent.record.deleted, true);
     const missingLookup = await mcp("tools/call", { name: "get_reminder", arguments: { listId, reminderId: "Reminder/READ-MISSING" } });
@@ -447,6 +491,11 @@ export async function verifyReminderWrites(options) {
     const beforeUncertainCompletion = state.modifies.length;
     await assert.rejects(runControlledLifecycleChecks(invoke, { listId, generation, idempotencyKey: lifecycleUncertainKey }), error => error.code === "WRITE_OUTCOME_UNKNOWN");
     assert.equal(state.modifies.length, beforeUncertainCompletion + 1);
+    const uncertainId = `Reminder/${lifecycleUncertainKey.toUpperCase()}`;
+    const submittedCompletion = state.modifies.at(-1);
+    const uncertainRepeat = await mcp("tools/call", { name: "complete_reminder", arguments: { listId, reminderId: uncertainId, recordChangeTag: submittedCompletion.recordChangeTag, expectedGeneration: generation } });
+    assert.equal(uncertainRepeat.result.structuredContent.error.code, "CONFLICT");
+    assert.equal(state.modifies.length, beforeUncertainCompletion + 1, "A committed but unconfirmed completion cannot be submitted twice.");
 
     const uncertainKey = randomUUID();
     state.nextModify = "committed-network-drop";
@@ -469,6 +518,8 @@ export async function verifyReminderWrites(options) {
       "stale-generation-tag-and-Apple-conflict-have-no-force-retry",
       "complete-reopen-and-version-checked-soft-delete-preserve-content",
       "legacy-write-approval-denies-lifecycle-actions",
+      "advertised-output-contracts-parameter-guidance-and-JSON-status-fallback",
+      "identical-versioned-mutation-replays-have-no-additional-effect",
       "recurrence-alarms-and-nested-state-writes-refused",
       "committed-5xx-and-network-drop-return-unknown-and-reconcile",
       "307-modify-response-never-follows-or-replays",

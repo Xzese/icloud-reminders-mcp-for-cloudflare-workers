@@ -56,25 +56,27 @@ function validTimeZone(value: string): boolean {
   }
 }
 
-const listId = z.string().min(6).max(255).regex(/^List\/[\x21-\x2e\x30-\x7e]+$/, "Expected a canonical List/<ASCII suffix> ID.");
-const reminderId = z.string().min(10).max(255).regex(/^Reminder\/[\x21-\x2e\x30-\x7e]+$/, "Expected a canonical Reminder/<ASCII suffix> ID.");
-const idempotencyKey = z.string().uuid();
-const title = z.string().min(1).max(2048).refine(value => value.trim().length > 0 && safeText(value), "Title must be nonblank text without unsafe controls or unpaired surrogates.");
-const notes = z.string().max(16_000).refine(safeText, "Notes cannot contain unsafe controls or unpaired surrogates.");
+const listId = z.string().min(6).max(255).regex(/^List\/[\x21-\x2e\x30-\x7e]+$/, "Expected a canonical List/<ASCII suffix> ID.").describe("Exact list ID from get_reminder_lists; do not use a list title or invent an ID.");
+const reminderId = z.string().min(10).max(255).regex(/^Reminder\/[\x21-\x2e\x30-\x7e]+$/, "Expected a canonical Reminder/<ASCII suffix> ID.").describe("Exact reminder ID from a previous read or mutation result, in the selected list.");
+const idempotencyKey = z.string().uuid().describe("Generate one UUID for each distinct new reminder. Retain this key and identical creation inputs to reconcile an uncertain creation; never generate a replacement key for that attempt.");
+const title = z.string().min(1).max(2048).refine(value => value.trim().length > 0 && safeText(value), "Title must be nonblank text without unsafe controls or unpaired surrogates.").describe("Nonblank plain-text title, up to 2,048 UTF-16 code units. Editing it replaces that field's formatting.");
+const notes = z.string().max(16_000).refine(safeText, "Notes cannot contain unsafe controls or unpaired surrogates.").describe("Plain-text notes, up to 16,000 UTF-16 code units. An empty string clears notes; editing replaces their formatting.");
 const dueDate = z.string().max(64).refine(validIsoDateTime, "Due date must be a valid ISO 8601 date-time with an explicit offset.");
 const timeZone = z.string().min(1).max(128).refine(validTimeZone, "Time zone must be a valid IANA time-zone identifier.");
-const priority = z.union([z.literal(0), z.literal(1), z.literal(5), z.literal(9)]);
-const nullableDueDate = dueDate.nullable();
-const nullableTimeZone = timeZone.nullable();
+const priority = z.union([z.literal(0), z.literal(1), z.literal(5), z.literal(9)]).describe("0: none; 1: high; 5: medium; 9: low.");
+const nullableDueDate = dueDate.nullable().describe("Valid ISO 8601 date-time with an explicit offset. Null clears the due date and, unless overridden, its time zone and all-day marker.");
+const nullableTimeZone = timeZone.nullable().describe("IANA time-zone identifier, such as Europe/London; null clears it. Required with a due date for all-day reminders.");
+const flagged = z.boolean().describe("Whether the reminder is flagged.");
+const allDay = z.boolean().describe("Whether the due date is all-day. True requires a due date and time zone. Omitted update fields stay unchanged.");
 
 export const ReminderChanges = z.object({
   title,
   notes,
   priority,
-  flagged: z.boolean(),
+  flagged,
   dueDate: nullableDueDate,
   timeZone: nullableTimeZone,
-  allDay: z.boolean(),
+  allDay,
 }).partial().strict();
 
 export const CreateReminderInput = z.object({
@@ -83,20 +85,20 @@ export const CreateReminderInput = z.object({
   title,
   notes: notes.default(""),
   priority: priority.default(0),
-  flagged: z.boolean().default(false),
+  flagged: flagged.default(false),
   dueDate: nullableDueDate.optional(),
   timeZone: nullableTimeZone.optional(),
-  allDay: z.boolean().default(false),
+  allDay: allDay.default(false),
 }).strict();
 
 export const ReminderTargetInput = z.object({
   listId,
   reminderId,
-  recordChangeTag: z.string().min(1).max(512).refine(value => !/[\u0000-\u001f\u007f]/.test(value)),
+  recordChangeTag: z.string().min(1).max(512).refine(value => !/[\u0000-\u001f\u007f]/.test(value)).describe("Current Apple version tag from get_reminder or get_reminders. Retain it for the exact request. A stale tag returns CONFLICT; never refresh it automatically to replay a write."),
 }).strict();
 
 export const UpdateReminderInput = ReminderTargetInput.extend({
-  changes: ReminderChanges,
+  changes: ReminderChanges.describe("Nonempty object containing only fields to change. Omitted fields and their formatting remain untouched; completion, reopening and deletion use separate tools."),
 }).strict();
 
 export type CreateReminderInputData = z.infer<typeof CreateReminderInput>;

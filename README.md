@@ -72,8 +72,18 @@ Review Git history before publishing a repository that previously contained priv
 | `reopen_reminder` | Reopen one completed reminder and clear its completion date; requires v2 write opt-in. |
 | `delete_reminder` | Soft-delete one open or completed reminder using its current version; requires v2 write opt-in. |
 
-Tools return `structuredContent` plus a text copy for client compatibility. Use the IDs returned
-by `get_reminder_lists`. `get_reminders` accepts `includeCompleted`, `limit` (1–200) and its returned
+Tools return `structuredContent` plus a text copy for client compatibility. Every tool advertises
+a typed output schema for successful results and describes its parameters in the input schema.
+Application failures return `isError: true` with a
+sanitized error object and matching JSON text, including recovery IDs when a write is uncertain.
+Read tools are marked read-only; Apple-facing tools use `openWorldHint: true`. Creation is additive,
+while editing, completion, reopening and deletion are marked destructive. All mutation tools
+use `idempotentHint: true`: identical creation inputs reuse the same UUID, and existing-item writes
+cannot apply twice with the same version tag. A repeated request can return `CONFLICT`; idempotency
+does not promise repeated success or authorize a new request with a fresh tag.
+
+Use the IDs returned by `get_reminder_lists`. `get_reminders` accepts `includeCompleted`, `limit`
+(1–200) and its returned
 `continuation`. An all-open result with `complete: false` may include a separate opaque continuation;
 call `get_all_open_reminders` again with that value and combine the returned records. Inspect errors
 before retrying and respect any `retryAfterSeconds`. A partial result is not the entire collection.

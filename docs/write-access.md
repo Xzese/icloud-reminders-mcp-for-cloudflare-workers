@@ -114,6 +114,29 @@ already in flight. A successful mutation invalidates unfinished all-open read co
 Neither reads nor writes extend the absolute local session deadline. No new tables, mutation
 receipt cache or additional Cloudflare resources are introduced.
 
+### MCP contracts and idempotency
+
+Each tool publishes input parameter descriptions and a typed output schema for successful
+`structuredContent`. The server validates successful results against that schema. Matching JSON
+text preserves the same information for clients that consume only text, including connection status.
+Application failures use `isError: true` and a sanitized error object with the same JSON text fallback;
+the success output schema does not describe error results.
+
+All mutation tools declare `readOnlyHint: false`, `idempotentHint: true` and `openWorldHint: true`.
+Creation declares `destructiveHint: false`; editing and state changes declare it true because
+they can overwrite or remove existing state. Read tools declare `readOnlyHint: true` and
+`destructiveHint: false`; idempotency hints have no meaning for read-only tools.
+
+Idempotency means identical arguments cause no additional reminder change, not that every repeat
+returns success. Creation reconciles the stable UUID; existing-item mutations refuse the original
+version after it advances. Retain the exact IDs, inputs, version tag and session generation.
+A fresh tag is a new request and must not be substituted automatically. After an uncertain result,
+use `get_reminder` to reconcile the exact item before deciding what to do next. These hints do not
+replace server permission checks or a client's user authorization for changes.
+
+See the MCP [tool contracts](https://modelcontextprotocol.io/specification/2025-11-25/server/tools)
+and [annotation definitions](https://modelcontextprotocol.io/specification/2025-11-25/schema#toolannotations).
+
 ## Local live acceptance
 
 1. Use a uniquely named, unshared iCloud list such as **MCP Test**. The test targets only its
