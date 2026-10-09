@@ -6,6 +6,3 @@ ENCRYPTION_KEY_ID="local-synthetic"
 ENCRYPTION_KEYS_JSON=
 LIVE_APPLE_CONNECTION_APPROVED=
 APPLE_CRYPTO_REVIEW_APPROVED=
-
-# Experimental direct Lists queries require an explicit opt-in; default is legacy.
-REMINDERS_LIST_DISCOVERY=legacy

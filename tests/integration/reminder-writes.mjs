@@ -107,10 +107,8 @@ export async function verifyReminderWrites(options) {
       const url = new URL(request.url);
       state.requests.push({ method: request.method, path: url.pathname });
       const body = request.method === "POST" ? await request.clone().json() : undefined;
-      if (url.pathname.endsWith("/changes/zone")) {
-        return jsonResponse({ zones: [{ zoneID: { zoneName: "Reminders", ownerRecordName: zoneOwner }, records: [listRecord()], syncToken: "synthetic-write-test-head", moreComing: false }] });
-      }
       if (url.pathname.endsWith("/records/query")) {
+        if (body.query.recordType === "Lists") return jsonResponse({ records: [state.records.get(listId)] });
         assert.equal(body.query.recordType, "reminderList");
         assert.equal(body.query.filterBy.find(filter => filter.fieldName === "List").fieldValue.value.recordName, listId);
         const includeCompleted = body.query.filterBy.find(filter => filter.fieldName === "includeCompleted").fieldValue.value === 1;
@@ -249,6 +247,14 @@ export async function verifyReminderWrites(options) {
     for (const parameter of Object.values(updateTool.inputSchema.properties.changes.properties)) assert.ok(parameter.description?.length > 0);
     const status = await mcp("tools/call", { name: "connection_status", arguments: {} });
     assert.equal(status.result.structuredContent.generation, generation);
+    state.records.get(listId).fields.Name.value = "S".repeat(257);
+    const currentLists = await mcp("tools/call", { name: "get_reminder_lists", arguments: { expectedGeneration: generation } });
+    assert.equal(currentLists.result.isError, undefined, JSON.stringify(currentLists.result));
+    assert.equal(currentLists.result.structuredContent.records[0].title, "S".repeat(257), "Live titles must not inherit the saved display snapshot title limit.");
+    assert.equal(currentLists.result.structuredContent.source, "direct-cloudkit-query");
+    assert.equal(currentLists.result.structuredContent.freshness.mode, "live");
+    assert.deepEqual(currentLists.result.structuredContent.records.map(list => list.id), [listId]);
+    assert.ok(state.requests.every(request => !request.path.endsWith("/changes/zone")), "The mutation journey discovers lists without history scanning.");
 
     const createKey = "46cf8eef-6cab-4aa2-a725-219769337d8b";
     const createArgs = { listId, idempotencyKey: createKey, title: "Café 🧭 — 東京", notes: "Keep this note 🌿", priority: 1, flagged: true };

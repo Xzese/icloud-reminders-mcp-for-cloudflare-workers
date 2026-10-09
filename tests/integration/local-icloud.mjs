@@ -69,7 +69,7 @@ try {
   assert.equal((await request("/api/connection", { headers: { cookie, "sec-fetch-site": "cross-site" } })).status, 403);
   assert.equal((await request("/api/connection", { headers: { cookie: `${cookie}; ${cookie}`, origin } })).status, 401);
   const privateValue = "private-content-cookie-token-account-identifier";
-  const summary = summarizeAppleResponse(new URL("https://p12-ckdatabasews.icloud.com/database/1/com.apple.reminders/production/private/changes/zone?dsid=" + privateValue), 200, { zones: [{ zoneID: { zoneName: "Reminders", ownerRecordName: privateValue }, syncToken: privateValue, moreComing: true, records: [{ recordType: "List", recordName: privateValue, fields: { Title: { value: privateValue } } }, { recordType: privateValue }] }] });
+  const summary = summarizeAppleResponse(new URL("https://p12-ckdatabasews.icloud.com/database/1/com.apple.reminders/production/private/records/query?dsid=" + privateValue), 200, { zones: [{ zoneID: { zoneName: "Reminders", ownerRecordName: privateValue }, syncToken: privateValue, moreComing: true, records: [{ recordType: "List", recordName: privateValue, fields: { Title: { value: privateValue } } }, { recordType: privateValue }] }] });
   assert.equal(summary.records, 2); assert.deepEqual(summary.recordTypes, { List: 1, other: 1 });
   assert.ok(!JSON.stringify(summary).includes(privateValue));
   const services = summarizeAppleResponse(new URL("https://setup.icloud.com/setup/ws/1/accountLogin"), 200, { dsInfo: { dsid: privateValue }, webservices: { ckdatabasews: { url: "https://p12-ckdatabasews.icloud.com/?token=" + privateValue }, untrusted: { url: "https://evil.example/" } } });

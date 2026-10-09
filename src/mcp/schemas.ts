@@ -36,18 +36,7 @@ export const ReminderOutput = z.object({
 }).strict();
 
 const recordError = z.object({ id: text, code: z.string() }).strict();
-const freshness = z.object({ mode: z.literal("checkpoint-then-live-query"), caughtUpAt: nullableTime }).strict();
-const catalogueSync = z.object({
-  phase: z.enum(["not-started", "ready", "incremental", "initial"]),
-  pages: counter,
-  initialComplete: z.boolean(),
-  pending: z.boolean(),
-  updatedAt: nullableTime,
-  initialPages: nullableTime,
-  totalPages: counter,
-  totalPagesKnown: z.boolean(),
-  lastPassPages: nullableTime,
-}).strict();
+const freshness = z.object({ mode: z.literal("live"), retrievedAt: counter.optional().describe("Time the current list set was retrieved; reminder contents are queried live per page.") }).strict();
 const page = {
   generation: counter,
   complete: z.boolean().describe("Whether this page has no unresolved record errors; use paginationComplete to determine whether the list has finished."),
@@ -55,12 +44,12 @@ const page = {
   continuation: z.string().nullable().describe("Opaque next-page value. Keep the same list and read options when continuing; null means no further page."),
   pendingReason: text,
   recordErrors: z.array(recordError),
-  catalogueSync,
   freshness,
+  source: z.enum(["direct-cloudkit-query", "direct-known-list-query"]),
   writesEnabled: z.boolean(),
 };
 
-export const ListsOutput = z.object({ ...page, records: z.array(SavedListSchema) }).strict();
+export const ListsOutput = z.object({ ...page, records: z.array(SavedListSchema.pick({ id: true }).extend({ title: text, color: text, count: counter.nullable(), isGroup: flag, deleted: flag, reminderIds: ids }).strict()) }).strict();
 export const RemindersPageOutput = z.object({
   ...page,
   listId: z.string(),
@@ -84,6 +73,7 @@ export const AllOpenOutput = z.object({
   pendingReason: text,
   progress: z.object({ listsTotal: counter, listsCompleted: counter, pagesRead: counter, totalPages: counter }).strict(),
   freshness,
+  source: z.literal("direct-cloudkit-query"),
   scope: z.literal("all-open-reminders"),
   writesEnabled: z.boolean(),
 }).strict();
@@ -107,6 +97,7 @@ export const ConnectionStatusOutput = z.object({
   nextAttemptAt: counter,
   transportReady: z.boolean(),
   expiresAt: nullableTime.describe("Absolute Apple session expiry in Unix milliseconds; reads and writes do not extend it."),
+  listDiscovery: z.object({ strategy: z.literal("direct"), liveValidated: z.literal(false), experimental: z.literal(true) }).strict(),
   gates: z.object({
     enabled: z.boolean(), liveConnectionApproved: z.boolean(), cryptographyReviewed: z.boolean(),
     loginPolicy: z.literal("device-only-v2"), verificationMethod: z.literal("trusted-device-spake2"),

@@ -37,14 +37,14 @@ async function observe(summary) {
 }
 const push = createLocalPushRelay({ observe });
 const worker = new Miniflare({
-  host: "127.0.0.1", port: 5173, inspectorPort: 0, unsafeTriggerHandlers: true, log: new Log(LogLevel.ERROR), d1Persist: join(state, "d1"),
+  host: "127.0.0.1", port: 5173, inspectorPort: 0, log: new Log(LogLevel.ERROR), d1Persist: join(state, "d1"),
   workers: [
     { name: "local-front-door", modules: true, scriptPath: join(root, "scripts/dev/local-icloud-gateway.mjs"), compatibilityDate: config.compatibility_date,
       bindings: { LOCAL_ORIGIN: origin, LOCAL_OWNER: keys.owner, LOCAL_ACCESS: randomBytes(32).toString("hex") }, serviceBindings: { APP: "local-reminders-app" } },
     { name: "local-reminders-app", modulesRoot: serverRoot,
       modules: [entrypoint, ...paths.filter(p => p !== entrypoint)].map(path => ({ type: "ESModule", path })),
       compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
-      bindings: { REMINDERS_LIST_DISCOVERY: process.env.REMINDERS_LIST_DISCOVERY ?? "legacy", CATALOGUE_BACKGROUND_RUNNER: "local", APP_ORIGIN: origin, REMINDERS_OWNER_ID: keys.owner, ENCRYPTION_KEY_ID: "local-live", ENCRYPTION_KEYS_JSON: JSON.stringify({ "local-live": keys.key }), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" },
+      bindings: { APP_ORIGIN: origin, REMINDERS_OWNER_ID: keys.owner, ENCRYPTION_KEY_ID: "local-live", ENCRYPTION_KEYS_JSON: JSON.stringify({ "local-live": keys.key }), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" },
       d1Databases: { DB: "isolated-local-icloud" },
       assets: { directory: join(root, "dist/client"), routerConfig: { has_user_worker: true } },
       outboundService: async request => {
@@ -73,29 +73,14 @@ const worker = new Miniflare({
         }
       },
     },
-  ].flatMap(worker => worker.name === "local-reminders-app" ? [worker, { ...worker, name: "local-catalogue-scheduler", routes: ["http://catalogue-background.local/*"], assets: undefined }] : [worker]),
-  // A dedicated application instance avoids Miniflare's fetch-only asset router
-  // for scheduled events. Both instances share the same D1 database and fences.
+  ],
 });
-let closing = false, backgroundActive = false;
-async function backgroundTick() {
-  if (closing || backgroundActive) return;
-  backgroundActive = true;
-  try {
-    const response = await worker.dispatchFetch("http://catalogue-background.local/cdn-cgi/handler/scheduled?cron=*+*+*+*+*");
-    if (response.status !== 200) console.warn("Background catalogue scheduler could not complete this tick.");
-    await response.body?.cancel();
-  } catch { if (!closing) console.warn("Background catalogue scheduler unavailable for this tick."); }
-  finally { backgroundActive = false; }
-}
-const backgroundTimer = setInterval(() => void backgroundTick(), 60_000);
 try {
   const db = await worker.getD1Database("DB", "local-reminders-app");
   await db.prepare(await readFile(join(root, "schema.sql"), "utf8")).run();
   await worker.ready;
   console.log(`Local Worker ready: ${origin}/`);
-  void backgroundTick();
-  console.log("The initial catalogue scan runs in the background. After completion, hourly catalogue checks and on-demand MCP reads fetch incremental updates.");
+  console.log("Lists are retrieved directly on refresh; no historical or scheduled catalogue work.");
   console.log("Separate encrypted local session; reminder creation, editing, completion, reopening and deletion are available after sign-in. Diagnostics contain metadata and counts only.");
-} catch (error) { closing = true; clearInterval(backgroundTimer); push.close(); await worker.dispose(); throw error; }
-for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => { closing = true; clearInterval(backgroundTimer); push.close(); await worker.dispose(); await logQueue; process.exit(0); });
+} catch (error) { push.close(); await worker.dispose(); throw error; }
+for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => { push.close(); await worker.dispose(); await logQueue; process.exit(0); });

@@ -15,7 +15,7 @@ Deploy it through **ChatGPT Sites** or to your own **Cloudflare Worker** protect
 Access and Managed OAuth. No containers, Python runtime, KV namespace or Durable Objects are required.
 
 The browser performs the Apple password proof exchange. The Worker stores Apple session cookies,
-tokens, list identifiers and scan checkpoints encrypted with AES-256-GCM in D1. Reminder contents
+tokens, list summaries and reminder pagination state encrypted with AES-256-GCM in D1. Reminder contents
 are fetched from Apple when requested and are not cached in D1.
 
 **Experimental, unofficial integration.** This project uses Apple's undocumented web protocols,
@@ -36,7 +36,7 @@ review the supported fields and limitations before using them.
 - [Connect ChatGPT](#connect-chatgpt)
 - [Connect your Apple account](#connect-your-apple-account)
 - [Use the dashboard](#use-the-dashboard)
-- [Scanning and pagination](#scanning-and-pagination)
+- [Direct retrieval and pagination](#direct-retrieval-and-pagination)
 - [Cloudflare repository builds](#cloudflare-repository-builds)
 - [Development and project structure](#development-and-project-structure)
 - [Security and licensing](#security-and-licensing)
@@ -61,16 +61,16 @@ Review Git history before publishing a repository that previously contained priv
 
 | Tool | Behaviour |
 | --- | --- |
-| `connection_status` | Report connection state, session generation and read availability; does not contact Apple. |
-| `get_reminder_lists` | Return current selectable lists through the configured direct or legacy discovery strategy. |
+| `connection_status` | Report connection state, session generation and tool availability; does not contact Apple. |
+| `get_reminder_lists` | Query current selectable private-zone lists directly, without historical scanning. |
+| `get_reminders` | Authorize an exact `listId` live, then fetch one current page without catalogue synchronization; open reminders by default. |
+| `get_all_open_reminders` | Discover selectable lists once per operation, then fetch open reminders with resumable per-list pages. |
 | `get_reminder` | Read one exact ID, including completed or soft-deleted state, for current version tags and recovery. |
 | `create_reminder` | Create one open reminder using a stable UUID `idempotencyKey`. |
 | `update_reminder` | Edit specified fields of one open reminder using its current `recordChangeTag`. |
 | `complete_reminder` | Complete one open reminder using its current version. |
 | `reopen_reminder` | Reopen one completed reminder and clear its completion date. |
 | `delete_reminder` | Soft-delete one open or completed reminder using its current version. |
-| `get_reminders` | Authorize an exact `listId` live, then fetch one current page without catalogue synchronization; open reminders by default. |
-| `get_all_open_reminders` | Discover selectable lists once per operation, then fetch open reminders with resumable per-list pages. |
 
 Tools return `structuredContent` plus a text copy for client compatibility. Every tool advertises
 a typed output schema for successful results and describes its parameters in the input schema.
@@ -123,7 +123,6 @@ includes a command that creates, edits, completes, reopens and deletes only its 
 | Owner authentication | Sites' dispatch-owned ChatGPT sign-in and Site-scoped identity | Cloudflare Access application, restrictive policy and Managed OAuth; Worker verifies Access JWTs. |
 | Encryption | Operator-provided Worker secret | Operator-provided Worker secret |
 | MCP registration | Site-hosted plugin at `/mcp` | Register `/mcp` as a custom OAuth MCP connection. |
-| Cron (optional) | No recurring Worker trigger is provisioned by this repository | Optional Worker Cron trigger; not required for MCP-driven scanning. |
 
 No R2 bucket, Workers KV, Queue, Durable Object, Apple developer application or OpenAI API key is
 used by this implementation. Your Cloudflare plan must support the CPU/memory needs of the login
@@ -139,7 +138,6 @@ cryptography and your Access configuration; validate those limits in your deploy
 | `APPLE_CRYPTO_REVIEW_APPROVED` | `device-proof-v2` acknowledges the operator's review of the browser proof protocol. |
 | `TEAM_DOMAIN` | Standalone only: `https://<team>.cloudflareaccess.com`. |
 | `POLICY_AUD` | Standalone only: Access application's audience tag. |
-| `CATALOGUE_BACKGROUND_RUNNER` | Optional: `cron` only with an actual standalone Cron trigger; local launcher sets `local`. |
 
 The two Apple login approval settings default to empty. They are operator acknowledgements, not a review
 or audit performed by the software. Do not enable them before reviewing the trust boundary and
@@ -228,8 +226,8 @@ configuration with Wrangler as a substitute for Sites publication.
    then choose it in a new chat. The endpoint is `https://<your-site>/mcp`. Sites manages the MCP
    OAuth connection; its non-user service token is not a substitute for the owner's identity.
 
-In default legacy mode, list and all-open MCP calls start and resume catalogue scans; known-list reads bypass them. This setup does not provision hourly
-closed-page background checks on Sites. Dashboard polling only displays saved progress.
+List and all-open MCP calls discover current lists directly. No historical scanning or scheduled
+refresh is required. Dashboard polling reads the encrypted saved snapshot without contacting Apple.
 
 ## Cloudflare Worker setup
 
@@ -341,33 +339,31 @@ Never send your Apple password, device code, encryption keys or cookies to the c
    pause after repeated errors or their safety limit. Device verification and Reminders-data
    approval are separate steps.
 6. Confirm the session is ready, then use a reminder MCP tool. Known-list reads verify access and
-   fetch reminders directly. List discovery uses the configured strategy described below.
+   fetch reminders directly. List discovery uses the direct query described below.
 
 The local application session expires after at most 24 hours. Reads do not extend it. Apple can
 reject it sooner; reconnect when required. Disconnect deletes the encrypted session record,
-catalogue and checkpoints. Expired records are cleared on next access, not by a timed purge.
+list snapshots and reminder continuations. Expired records are cleared on next access, not by a timed purge.
 
 ## Use the dashboard
 
-Sign in to your private workspace, then select **Connect Apple account**. In experimental direct
-mode, **Your lists** shows the saved list count and last successful retrieval time. **Refresh lists**
+Sign in to your private workspace, then select **Connect Apple account**. **Your lists** shows the
+saved list count and last successful retrieval time. **Refresh lists**
 fetches current lists; a failed refresh keeps the previous snapshot visible and reports an error.
 The 15-second display polling reads saved status only and does not contact Apple.
 
 - **Preview reminders** verifies the selected list live and fetches open reminders. **Include
   completed reminders** and **Show more reminders** retain their existing behavior.
-- **Testing & details** contains exact list lookup, response details and legacy scan diagnostics.
-- Default legacy mode retains **Start list scan**, **Continue list scan**, **Pause scan** and
-  **Check for updates**. Completed pages stay saved when the browser closes.
+- **Testing & details** contains exact list lookup, response details and bounded reminder diagnostics.
 - **Disconnect Apple account** deletes the encrypted session, snapshots and continuations.
   Workspace sign-out does not disconnect Apple.
 
-## Scanning and pagination
+## Direct retrieval and pagination
 
-`REMINDERS_LIST_DISCOVERY=legacy` is the default. Setting it to `direct` explicitly opts into the
-experimental private CloudKit `Lists` query. Configure this in your runtime environment or ignored
-operator config, without changing public identity or approval placeholders. Unknown values fail
-with a configuration error. There is no automatic strategy change after an Apple error.
+Direct CloudKit querying is the sole list-discovery path. Historical scanning, checkpoints,
+automatic catalogue work and strategy selection have been removed. If Apple rejects the query,
+the call reports the classified error; it does not switch to a historical fallback. Known-list
+reminder reads can still authorize a list and fetch its contents independently of discovery.
 
 Direct discovery validates the authenticated private Reminders zone, sends `query.recordType=Lists`
 and accepts singular `List` records. It follows opaque `continuationMarker` pages without any
@@ -379,7 +375,8 @@ all-open selection exclude deleted lists and groups. Shared-database lists are n
 **Live validation is limited to one account.** An approved local test on 2026-10-09 returned the
 owner's three expected lists, picked up a new list and removed it after deletion, with zero change
 calls. Live pagination, groups, renamed/old/empty-list coverage and shared-list completeness remain
-unverified, so direct mode stays opt-in. The [pinned external reference](https://github.com/fineyh/icloud-reminders-desktop/blob/3dbbbed9eef3d2f3a6d13be28475c2d4585504a0/src/backend/reminders_api.py)
+unverified. Direct discovery is now the only path at the owner’s request; these remaining limits
+are not evidence of broader completeness. The [pinned external reference](https://github.com/fineyh/icloud-reminders-desktop/blob/3dbbbed9eef3d2f3a6d13be28475c2d4585504a0/src/backend/reminders_api.py)
 supports the request format, while synthetic tests cover parsing and bounded continuation handling. See
 [discovery evidence and validation procedure](docs/direct-list-retrieval.md).
 
@@ -389,8 +386,9 @@ refresh atomically replaces the encrypted snapshot, including removals. Duplicat
 summaries are deduplicated; conflicting summaries, malformed records or wrong owners fail safely.
 Repeated continuations and incomplete/error pages never publish a complete catalogue. A bounded
 incomplete discovery returns `UNSUPPORTED_FEATURE` and preserves the last snapshot. List discovery
-does not expose a resumable MCP cursor; retry a refresh or explicitly choose legacy recovery for
-collections exceeding these bounds. No historical scan starts automatically after failure.
+does not expose a resumable MCP cursor; collections exceeding these bounds cannot currently
+complete list discovery. Retry a transient failure; persistent limits or unsupported queries require
+a future protocol change. There is no historical fallback.
 
 Direct list responses report `source: "direct-cloudkit-query"` and `freshness.mode: "live"`.
 There is no TTL cache: normal direct list calls and explicit refreshes contact Apple. Saved dashboard
@@ -407,33 +405,18 @@ owner/session-bound continuation. Combine successful pages, inspect failures bef
 respect `retryAfterSeconds`. `complete: true` requires every selected list to finish successfully.
 Results across lists are not an atomic Apple snapshot. Reminder contents are never persisted.
 
-Legacy recovery keeps the forward change scanner and encrypted resumable checkpoints. List and
-initial all-open calls process at most 25 history pages within 20 seconds and can return retryable
-`SYNC_IN_PROGRESS`; repeat without inventing a cursor. A pass has a 1,000-page cap. Expired tokens
-require an explicit diagnostic restart. After a direct snapshot exists, legacy recovery uses a
-separate encrypted list collection so historical work cannot overwrite that snapshot. Existing
-version-1 sessions remain compatible; no D1 migration or session reset is required.
+Existing encrypted version-1 sessions remain compatible; no D1 migration or session reset is
+required. Recognized historical checkpoint, scheduler and recovery fields are ignored on load and
+removed on the next successful encrypted commit. Their old all-open continuations are retired;
+start a new all-open operation if one conflicts after upgrade. Valid direct-query continuations,
+credentials, list snapshots, owner boundaries and absolute expiry remain intact. Unknown active
+fields still fail strict validation.
 
-Direct mode suppresses automatic catalogue scanning. Legacy background execution is optional and
-requires a configured runner. ChatGPT Sites does not provision a scheduled Worker trigger; ordinary
-known-list reads work without one in both modes.
-
-For optional unattended scanning on a **standalone Worker**, add both of these to the ignored
-production config, then deploy:
-
-```toml
-[triggers]
-crons = ["* * * * *"]
-
-# Add this setting to the existing [vars] table:
-[vars]
-CATALOGUE_BACKGROUND_RUNNER = "cron"
-```
-
-Merge the variable into your existing `[vars]` table; do not create a second table or replace the other settings. The minute trigger
-resumes bounded initial/pending work; after catching up, server-side due dates limit catalogue
-checks to hourly. Disconnection, absolute expiry, paused checks and error backoff stop work.
-Declaring a handler or setting the flag without provisioning the trigger does not schedule anything.
+Remove old `REMINDERS_LIST_DISCOVERY`, `CATALOGUE_BACKGROUND_RUNNER` and
+`REMINDERS_ENABLE_CRON` settings from operator configuration. They no longer select a strategy or
+start work. Remove previously provisioned catalogue Cron triggers when deploying the upgrade;
+the Worker no longer exports a scheduled handler. Generated deployment configs omit triggers.
+No production configuration is changed by this source update.
 
 ## Cloudflare repository builds
 
@@ -446,9 +429,6 @@ Keep actual resource identifiers and runtime settings in Cloudflare, not in publ
 3. Use `npm run install:ci` to install, and `npm run deploy:cloudflare` as the deployment command.
    Initialize a new D1 database by executing `schema.sql` before its first deployment. The generated config uses
    `keep_vars = true` and omits `[vars]` in this path so dashboard configuration is retained.
-4. If using Cron, manage its configuration deliberately: the repository build path does not
-   invent a trigger or reproduce a private local configuration. Set the build variable `REMINDERS_ENABLE_CRON=true` to include the minute trigger, and set
-   runtime `CATALOGUE_BACKGROUND_RUNNER=cron` separately; otherwise use manual config deployments.
 
 No GitHub workflow in this repository deploys production or receives Apple credentials.
 
@@ -475,8 +455,8 @@ src/
   lib/               Shared utilities and connector helpers
   types/             Application and Worker type declarations
   api/               Authenticated API routing
-  mcp/               MCP reads and gated reminder mutation tools
-  auth/              Apple authentication and catalogue synchronization
+  mcp/               MCP read and reminder mutation tools
+  auth/              Apple authentication and direct reminder reads
   crypto/            Protocol cryptography and encrypted storage envelopes
   icloud/            CloudKit transport and record normalization
   persistence/       Native D1 session storage

@@ -33,7 +33,7 @@ does not confer the owner's identity or permission to read their Apple session.
 ## System and trust boundaries
 
 Protected assets include Apple session cookies/tokens, account identifiers, reminder contents,
-encryption keys and saved synchronization checkpoints. Requests, WebSocket messages, CloudKit
+encryption keys, encrypted list summaries and reminder pagination state. Requests, WebSocket messages, CloudKit
 responses, opaque cursors and decrypted protocol documents remain untrusted inputs.
 
 The Apple password is processed by a dedicated browser script. The Worker receives authentication
@@ -55,9 +55,10 @@ application's local 24-hour session limit.
   stored session state; expiry must reject reads and clear expired records on access.
 - Authorize known list IDs with a current exact private-zone lookup; encrypted saved summaries
   alone are never proof of access. Reject wrong zone/owner, deleted lists and groups before content
-  reads. Direct discovery must be explicitly selected and must not silently fall back on errors.
-- Commit direct list snapshots only after complete, bounded discovery. Keep legacy recovery state
-  separate from newer direct evidence. All-open continuations retain their original list selection,
+  reads. Direct discovery is the sole path and must report unsupported or incomplete results
+  without a historical fallback.
+- Commit direct list snapshots only after complete, bounded discovery. Strip recognized retired
+  historical fields without resetting valid Apple sessions. All-open continuations retain their original list selection,
   remain single-use and expire with the session or after ten minutes.
 - Allow reminder mutations only for the bound authenticated owner with a current ready Apple
   session. Exact private-zone list and reminder lookups must precede a write.
@@ -72,7 +73,7 @@ application's local 24-hour session limit.
   disconnect fencing. A timeout, malformed confirmation or lost fence after submission must
   require reconciliation instead of reporting a confirmed failure or success.
 - Use bounded reads, pagination, transport sizes, decompression,
-  checkpoint-cycle detection and upstream backoff rather than indefinite retries.
+  continuation-cycle detection and upstream backoff rather than indefinite retries.
 - Prevent cross-origin state changes and authentication WebSocket access. Preserve the isolated
   credential page's nonce CSP and no-referrer policy; do not add analytics or third-party scripts.
 - Never log credentials, proof material, cookies, raw Apple errors, reminder contents, opaque

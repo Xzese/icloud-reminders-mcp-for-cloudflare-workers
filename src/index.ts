@@ -5,5 +5,4 @@ export default {
   fetch(request: Request, env: Cloudflare.Env & CloudflareAccessEnv, ctx: Parameters<typeof sitesWorker.fetch>[2]) {
     return cloudflareAccessFetch(request, env, (authenticatedRequest) => sitesWorker.fetch(authenticatedRequest, env, ctx));
   },
-  scheduled: sitesWorker.scheduled,
 };

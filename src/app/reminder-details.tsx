@@ -1,6 +1,6 @@
 "use client";
 import { useState } from "react";
-import type { CatalogueRecord, RelatedRecord } from "./catalogue-scan.ts";
+import type { ReadRecord, RelatedRecord } from "./read-types.ts";
 
 // Apple fields are rendered as escaped text. Asset URLs are never followed,
 // and encoded documents/attachments are never executed or downloaded here.
@@ -8,7 +8,7 @@ export function AppleRecordDetails({ record, label = "All Apple record data" }: 
   const [open, setOpen] = useState(false);
   return <details className="apple-record-details" onToggle={event => setOpen(event.currentTarget.open)}><summary>{label}</summary>{open && <pre>{JSON.stringify(record, null, 2)}</pre>}</details>;
 }
-const fields: [keyof CatalogueRecord, string][] = [
+const fields: [keyof ReadRecord, string][] = [
   ["id", "Reminder ID"], ["listId", "List ID"], ["completed", "Completed"], ["completedDate", "Completed at"],
   ["dueDate", "Due"], ["startDate", "Starts"], ["priority", "Priority"], ["flagged", "Flagged"], ["allDay", "All day"],
   ["deleted", "Deleted"], ["timeZone", "Time zone"], ["parentReminderId", "Parent reminder"], ["alarmIds", "Alarms"],
@@ -21,7 +21,7 @@ function valueText(value: unknown) {
   if (Array.isArray(value)) return value.length ? value.join(", ") : "None";
   return String(value);
 }
-export function ReminderDetails({ reminder }: { reminder: CatalogueRecord }) {
+export function ReminderDetails({ reminder }: { reminder: ReadRecord }) {
   return <>
     <strong>{reminder.title ?? reminder.id}</strong>{reminder.deleted && <span> · deleted</span>}{reminder.completed && <span> · completed</span>}
     {reminder.notes && <p>{reminder.notes}</p>}

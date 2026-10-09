@@ -29,27 +29,29 @@ Worker handles bounded Apple HTTP/WebSocket exchanges, trusted-device verificati
 consent. It stores encrypted session credentials with an absolute local lifetime rather than
 storing the password. The cryptography and protocol are unofficial and need independent review.
 
-List discovery is selected by `REMINDERS_LIST_DISCOVERY`: default `legacy` keeps bounded forward
-catalogue synchronization; explicit experimental `direct` uses the private CloudKit `Lists` query
-without reading history. Singular `List` summaries are normalized across bounded continuations and
-committed only after complete retrieval. The authoritative direct snapshot and optional legacy
-recovery collection share the existing encrypted version-1 envelope. Added fields are optional,
-so existing sessions, checkpoints and all-open continuations load without a schema migration.
+List discovery uses the private CloudKit `Lists` query without reading history. Singular `List`
+summaries are normalized across bounded continuations and committed only after complete retrieval.
+The encrypted snapshot supports dashboard display; MCP list calls always fetch live data.
+Historical discovery, scheduler execution and strategy selection have been removed.
 
 Known-list reads use a live exact lookup within the authenticated Reminders zone before the existing
-`reminderList` query. They do not inspect catalogue checkpoints. All-open starts with the configured
-discovery strategy, stores selected list summaries/IDs and per-list cursors, and rotates single-use
-continuations before queries. Direct resumption never rediscovers lists and a dashboard refresh
-cannot skip outstanding pages. Reminder bodies are not persisted. Every remote operation retains
-read leases, version/generation fences and absolute expiry checks on commit.
+`reminderList` query. All-open starts with direct discovery, stores selected list summaries/IDs and
+per-list cursors, and rotates single-use continuations before queries. Resumption never rediscovers
+lists, and a dashboard refresh cannot skip outstanding pages. Reminder bodies are not persisted.
+Every remote operation retains read leases, version/generation fences and absolute expiry checks
+on commit.
 
-Direct mode suppresses the optional background scanner. Legacy scheduled events reuse the fenced
-catalogue operation only when a runner is configured. Neither a background-handler declaration nor
-browser polling provisions a recurring trigger. Dashboard polling reads saved state only. Direct
-list discovery has synthetic coverage and an approved one-account live test of existing lists and
-creation/deletion freshness. Live pagination, groups and shared database completeness remain unknown;
-direct mode stays opt-in.
-See [direct discovery evidence](direct-list-retrieval.md).
+Version-1 session compatibility strips only recognized obsolete catalogue fields. The next successful
+commit removes those fields from encrypted storage. Historical or unmarked old all-open continuations
+are retired without disconnecting the Apple session; direct operation selections remain valid.
+No D1 migration or reset is needed. Unknown active fields still fail strict validation.
+
+Dashboard polling reads saved state only. There is no scheduled handler, local background timer or
+historical fallback. Generated standalone configs omit triggers; operators must remove previously
+provisioned catalogue schedules during their own deployment. Direct discovery has synthetic coverage
+and an approved one-account live test of existing lists and creation/deletion freshness. Live
+pagination, groups and shared database completeness remain unknown. See
+[direct discovery evidence](direct-list-retrieval.md).
 
 Reminder creation, editing, completion, reopening and deletion use the same private CloudKit
 transport and session lease. They require the bound authenticated owner and a ready unexpired
