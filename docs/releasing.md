@@ -13,6 +13,9 @@ The configuration check rejects private identifiers, common credential patterns 
 private/generated files. Review scanner findings and Git history before publishing. These checks
 are not an exhaustive security audit or a cryptographic audit. Never force-add ignored keys,
 local environment files, session databases, private deployment copies or old private Git history.
+The Gitleaks configuration retains all default rules and excepts only five exact invented
+idempotency UUIDs in the synthetic write acceptance fixture. Do not add broad fixture, path,
+commit or UUID exemptions to hide a real credential finding.
 
 Use the title **iCloud Reminders MCP Server for Cloudflare Workers** and a repository name such as
 `icloud-reminders-mcp-for-cloudflare-workers`. The repository is MIT-licensed; preserve the
