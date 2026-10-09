@@ -344,8 +344,10 @@ Never send your Apple password, device code, encryption keys or cookies to the c
 4. Approve the trusted-device prompt and enter the six-digit code **on the credential page** when
    its code field appears. SMS, voice and legacy device-code fallbacks are not supported.
 5. Return to the dashboard. If Apple separately requires web access to your Reminders keys,
-   approve that request on your device and use **Check Apple approval**. Device verification
-   and Reminders-data approval are separate steps.
+   approve that request on your device. The dashboard checks approval automatically while visible,
+   respecting Apple’s retry time. **Check Apple approval** remains available if automatic checks
+   pause after repeated errors or their safety limit. Device verification and Reminders-data
+   approval are separate steps.
 6. Confirm the session is ready, then use a reminder MCP tool. Scanning starts automatically on
    that call; no manual catalogue scan is required.
 
@@ -359,8 +361,11 @@ Sign in to your private workspace, then select **Connect Apple account**. The st
 shows whether Apple is connected, Reminders access is ready, lists have been found and the
 initial list scan is complete.
 
-- **Start list scan** finds your lists. **Pause scan** stops the current browser request;
-  **Continue list scan** resumes from saved progress. Keep the page open during manual scans.
+- Opening the dashboard with a ready Apple connection automatically starts or resumes the list
+  scan, or checks for changes after a completed scan. Explicitly paused automatic checks are
+  respected. **Pause scan** stops the current browser request and stays paused for this visit;
+  **Continue list scan** resumes saved progress. A scan pass stops after five minutes or its
+  1,000-page safety limit. Keep the page open while scanning.
 - **Check for updates** reads changes after the saved checkpoint once the initial scan is complete.
 - **Preview reminders** lets you choose a list and show its open reminders, with an option to
   include completed reminders. **Show more reminders** reads another bounded page.

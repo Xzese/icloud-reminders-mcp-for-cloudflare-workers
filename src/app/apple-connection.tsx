@@ -44,19 +44,24 @@ export default function AppleConnection() {
   const [now, setNow] = useState(() => Date.now());
   const revision = useRef(0);
   const statusRequest = useRef<AbortController | null>(null);
+  const actionRequest = useRef<AbortController | null>(null);
+  const errorSource = useRef<"status" | "action" | null>(null);
+  const [approval, setApproval] = useState({ generation: -1, attempts: 0, failures: 0, lastAttemptAt: 0, paused: false });
   const onScanChange = useCallback((next: ScanSummary) => setScan(next), []);
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (automatic = false) => {
+    if (automatic && (statusRequest.current || actionRequest.current)) return;
     const current = ++revision.current;
     statusRequest.current?.abort();
     const controller = new AbortController(); statusRequest.current = controller;
-    setRefreshing(true);
+    if (!automatic) setRefreshing(true);
     try {
       const next = await call<Status>("/api/connection", undefined, controller.signal);
       if (current !== revision.current) return;
-      setStatus(next); setNow(Date.now()); setOwnerIdentity(null); setError("");
+      setStatus(next); setNow(Date.now()); setOwnerIdentity(null); if (!automatic || errorSource.current === "status") { setError(""); errorSource.current = null; }
       if (next.state !== "READY") setScan(emptyScan);
     } catch (e) {
       if (current !== revision.current || controller.signal.aborted) return;
+      errorSource.current = "status";
       setError(e instanceof Error ? e.message : "Connection status is unavailable. Try again in a moment.");
       if (e instanceof ConnectionError && e.code === "OWNER_NOT_CONFIGURED") {
         try {
@@ -64,9 +69,11 @@ export default function AppleConnection() {
           if (current === revision.current && identity.automaticOwnerClaim === false) setOwnerIdentity(identity.authenticatedUserId);
         } catch { if (current === revision.current) setOwnerIdentity(null); }
       }
-    } finally { if (current === revision.current) setRefreshing(false); }
+    } finally {
+      if (current === revision.current) { statusRequest.current = null; setRefreshing(false); }
+    }
   }, []);
-  useEffect(() => { let mounted = true; const revisionRef = revision; const requestRef = statusRequest; queueMicrotask(() => { if (mounted) void refresh(); }); return () => { mounted = false; revisionRef.current++; requestRef.current?.abort(); }; }, [refresh]);
+  useEffect(() => { let mounted = true; const revisionRef = revision; const requestRef = statusRequest; queueMicrotask(() => { if (mounted) void refresh(); }); return () => { mounted = false; revisionRef.current++; requestRef.current?.abort(); actionRequest.current?.abort(); }; }, [refresh]);
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), status?.state === "DEVICE_APPROVAL_PENDING" ? 1000 : 30_000);
     return () => clearInterval(timer);
@@ -74,19 +81,69 @@ export default function AppleConnection() {
   const expired = !!status?.expiresAt && status.expiresAt <= now;
   useEffect(() => { if (!expired || status?.state !== "READY") return; const timer = setTimeout(() => void refresh(), 0); return () => clearTimeout(timer); }, [expired, status?.state, refresh]);
   const onSessionRejected = useCallback((message: string) => { setError(message); void refresh(); }, [refresh]);
-  async function action(path: string) {
-    if (!status || busyAction || refreshing) return;
-    setBusyAction(path); setError("");
+  const action = useCallback(async (path: string, automatic = false) => {
+    if (!status || busyAction || refreshing || actionRequest.current || (automatic && statusRequest.current)) return;
+    const controller = new AbortController(); actionRequest.current = controller;
+    setBusyAction(path); setError(""); errorSource.current = null;
     revision.current++; statusRequest.current?.abort();
-    try { await call(path, { expectedGeneration: status.generation }); await refresh(); }
-    catch (e) { setError(e instanceof Error ? e.message : "That action didn’t finish. Please try again."); }
-    finally { setBusyAction(null); }
-  }
+    if (path === "/api/auth/resume") setApproval(previous => ({
+      generation: status.generation, attempts: (previous.generation === status.generation ? previous.attempts : 0) + 1,
+      failures: previous.generation === status.generation ? previous.failures : 0, lastAttemptAt: Date.now(), paused: false,
+    }));
+    try {
+      await call(path, { expectedGeneration: status.generation }, controller.signal);
+      if (controller.signal.aborted) return;
+      if (path === "/api/auth/resume") setApproval(previous => ({ ...previous, failures: 0 }));
+      await refresh();
+    } catch (e) {
+      if (controller.signal.aborted) return;
+      // A failed request can still have saved a fenced result. Restore status
+      // before deciding whether another approval check is appropriate.
+      await refresh();
+      if (automatic) setApproval(previous => {
+        const failures = previous.failures + 1;
+        const transient = !(e instanceof ConnectionError) || ["CONFLICT", "RATE_LIMITED", "UPSTREAM_UNAVAILABLE"].includes(e.code ?? "");
+        return { ...previous, failures, paused: !transient || failures >= 3 };
+      });
+      errorSource.current = "action";
+      setError(e instanceof Error ? e.message : "That action didn’t finish. Please try again.");
+    } finally {
+      if (actionRequest.current === controller) { actionRequest.current = null; setBusyAction(null); }
+    }
+  }, [status, busyAction, refreshing, refresh]);
+  useEffect(() => {
+    let stopped = false;
+    let polling = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      if (stopped || polling) return;
+      polling = true;
+      try { if (document.visibilityState !== "hidden") await refresh(true); }
+      finally {
+        polling = false;
+        if (!stopped) timer = setTimeout(() => void poll(), status?.state === "CONNECTING" || status?.state === "DEVICE_APPROVAL_PENDING" ? 5000 : 30_000);
+      }
+    };
+    const visible = () => { if (document.visibilityState !== "hidden") { clearTimeout(timer); void poll(); } };
+    timer = setTimeout(() => void poll(), status?.state === "CONNECTING" || status?.state === "DEVICE_APPROVAL_PENDING" ? 5000 : 30_000);
+    document.addEventListener("visibilitychange", visible);
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
+  }, [status?.state, refresh]);
+  const approvalPaused = !!status && approval.generation === status.generation && (approval.paused || approval.attempts >= 8);
+  useEffect(() => {
+    if (!status?.gates.enabled || status.state !== "DEVICE_APPROVAL_PENDING" || expired || refreshing || busyAction || approvalPaused) return;
+    const previous = approval.generation === status.generation ? approval : null;
+    const nextCheck = Math.max(status.nextAttemptAt, previous ? previous.lastAttemptAt + Math.min(60_000, 15_000 * 2 ** previous.failures) : 0);
+    const timer = setTimeout(() => {
+      if (document.visibilityState !== "hidden") void action("/api/auth/resume", true);
+    }, Math.max(0, nextCheck - Date.now()));
+    return () => clearTimeout(timer);
+  }, [status, expired, refreshing, busyAction, approval, approvalPaused, action]);
   const ready = !!status?.gates.enabled && status.state === "READY" && status.transportReady && !expired;
   const pending = status?.state === "DEVICE_APPROVAL_PENDING" && !expired;
   const busy = refreshing || busyAction !== null;
   const title = !status ? (error ? "Connection unavailable" : "Checking your connection…") : expired ? "Connect again to continue" : ready ? "Apple account connected" : pending ? "Approve access on your Apple device" : !status.gates.enabled ? "Apple connection is paused" : "Connect your Apple account";
-  const description = !status ? (error ? "Your connection status could not be loaded. Refresh to try again." : "We’re checking whether your Apple account is connected.") : expired ? "Your Apple session has ended. Connect again to refresh your lists and reminders." : ready ? "You’re ready to find your lists and read your reminders." : pending ? (status.action === "wait-for-reminders-keys" ? "Your device approval was accepted. Apple is preparing access to your reminders." : "Allow web access when Apple asks on your trusted device, then check approval below.") : !status.gates.enabled ? "The Apple connection is currently unavailable. You can check again here when it’s enabled." : "Connect once, then use ChatGPT or this page to check your reminders.";
+  const description = !status ? (error ? "Your connection status could not be loaded. Refresh to try again." : "We’re checking whether your Apple account is connected.") : expired ? "Your Apple session has ended. Connect again to refresh your lists and reminders." : ready ? "You’re ready to find your lists and read your reminders." : pending ? (status.action === "wait-for-reminders-keys" ? "Your device approval was accepted. Apple is preparing access to your reminders." : "Allow web access when Apple asks on your trusted device. We’ll check approval automatically while this page is open.") : !status.gates.enabled ? "The Apple connection is currently unavailable. You can check again here when it’s enabled." : "Connect once, then use ChatGPT or this page to check your reminders.";
   const checks = [
     { label: "Workspace signed in", checked: true },
     { label: "Apple account connected", checked: ready },
@@ -103,7 +160,7 @@ export default function AppleConnection() {
         <details className="testing-panel"><summary>Workspace setup</summary><div className="testing-content"><p>Copy this setup identity for the person configuring your workspace.</p><label htmlFor="site-identity">Your Site identity</label><input id="site-identity" value={ownerIdentity} readOnly /><div className="action-row"><Button variant="outline" onClick={() => void navigator.clipboard.writeText(ownerIdentity).then(() => setCopied(true)).catch(() => setError("Copy didn’t work. Select the setup identity and copy it manually."))}><Copy size={16} aria-hidden="true" />{copied ? "Copied" : "Copy Site identity"}</Button><Button variant="ghost" disabled={busy} onClick={() => void refresh()}>Check setup</Button></div></div></details>
       </section> : <section className="dashboard-card" aria-labelledby="connection-title">
         <div className="card-heading"><div className="card-icon"><Cloud size={23} aria-hidden="true" /></div><div><h2 id="connection-title">{title}</h2><p>{description}</p></div></div>
-        {ready ? <div className="account-banner"><ShieldCheck size={20} aria-hidden="true" /><span>{status?.writeEnabled ? (status?.capabilities?.delete ? "You can create, edit, complete and delete reminders with ChatGPT." : "You can create and edit open reminders with ChatGPT.") : "Your connection is ready. Reminder changes are turned off."}</span></div> : pending ? <div className="action-row"><Button className="action-primary" disabled={busy || now < (status?.nextAttemptAt ?? 0)} onClick={() => void action("/api/auth/resume")}><RefreshCw size={17} className={busyAction ? "animate-spin" : undefined} aria-hidden="true" />{busyAction ? "Checking approval…" : "Check Apple approval"}</Button>{status && status.nextAttemptAt > now && <p className="fine-print" role="status">Try again in {Math.ceil((status.nextAttemptAt - now) / 1000)} seconds.</p>}</div> : status?.gates.enabled && <><a className="button-link action-primary" href="/connect/apple" target="_top">{status.state === "CONNECTING" ? "Continue Apple sign-in" : "Connect Apple account"}<ArrowRight size={17} aria-hidden="true" /></a><div className="notice"><Info size={17} className="notice-icon" aria-hidden="true" /><p>This uses an unofficial iCloud connection. On the next page, this app processes your Apple password to sign in and Apple verifies your device.</p></div></>}
+        {ready ? <div className="account-banner"><ShieldCheck size={20} aria-hidden="true" /><span>{status?.writeEnabled ? (status?.capabilities?.delete ? "You can create, edit, complete and delete reminders with ChatGPT." : "You can create and edit open reminders with ChatGPT.") : "Your connection is ready. Reminder changes are turned off."}</span></div> : pending ? <div className="action-row"><Button className="action-primary" disabled={busy || now < (status?.nextAttemptAt ?? 0)} onClick={() => void action("/api/auth/resume")}><RefreshCw size={17} className={busyAction ? "animate-spin" : undefined} aria-hidden="true" />{busyAction ? "Checking approval…" : "Check Apple approval"}</Button><p className="fine-print" role="status">{approvalPaused ? "Automatic approval checks are paused. Check again manually or reconnect Apple if approval is still pending." : "We’re checking Apple approval automatically. You can also check now."}</p></div> : status?.gates.enabled && <><a className="button-link action-primary" href="/connect/apple" target="_top">{status.state === "CONNECTING" ? "Continue Apple sign-in" : "Connect Apple account"}<ArrowRight size={17} aria-hidden="true" /></a><div className="notice"><Info size={17} className="notice-icon" aria-hidden="true" /><p>This uses an unofficial iCloud connection. On the next page, this app processes your Apple password to sign in and Apple verifies your device.</p></div></>}
         <div className="action-row"><Button variant="outline" disabled={busy || scan.busy} onClick={() => void refresh()}><RefreshCw size={16} className={refreshing ? "animate-spin" : undefined} aria-hidden="true" />{refreshing ? "Checking connection…" : "Refresh connection"}</Button></div>
       </section>}
       {error && !ownerIdentity && <p className="connection-error notice notice-warning" role="alert">{error}</p>}
