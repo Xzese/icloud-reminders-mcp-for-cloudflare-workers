@@ -29,7 +29,7 @@ const worker = new Miniflare({
   bindings: { APP_ORIGIN: origin, REMINDERS_OWNER_ID: owner, TEAM_DOMAIN: issuer, POLICY_AUD: "synthetic-audience", ENCRYPTION_KEY_ID: "synthetic", ENCRYPTION_KEYS_JSON: JSON.stringify({ synthetic: randomBytes(32).toString("base64") }) },
   d1Databases: { DB: "synthetic-reminders-access" }, d1Persist: directory,
   assets: { directory: join(root, "dist/client"), routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true } },
-  outboundService: request => mockFetch(request, { dispatcher: mock }), log: new Log(LogLevel.ERROR),
+  outboundService: request => mockFetch(request.url, { method: request.method, headers: Object.fromEntries(request.headers), body: request.body, duplex: "half", redirect: "manual", signal: request.signal, dispatcher: mock }), log: new Log(LogLevel.ERROR),
 });
 try {
   const db = await worker.getD1Database("DB");
