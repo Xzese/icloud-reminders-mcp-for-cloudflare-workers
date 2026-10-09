@@ -365,6 +365,12 @@ No GitHub workflow in this repository deploys production or receives Apple crede
 
 ## Development and project structure
 
+Dependabot checks weekly and groups routine minor/patch updates into one npm PR and one GitHub
+Actions PR. Routine bot updates enable squash auto-merge automatically; the four protected-branch
+CI checks must pass before merging. Major upgrades remain manual, and failed updates stay blocked.
+Merged branches are deleted automatically. The automation follows the
+[email MCP server's workflow](https://github.com/Xzese/email-mcp-for-cloudflare-workers/blob/main/.github/workflows/dependabot-auto-merge.yml).
+
 ```text
 src/
   index.ts           Standalone Cloudflare Worker entrypoint with Access verification

@@ -1,6 +1,6 @@
 // Acceptance journey against the exact production bundle in workerd, with synthetic data.
-import { Miniflare, Log, LogLevel, createFetchMock } from "miniflare";
-import { fetch as mockFetch } from "undici";
+import { Miniflare, Log, LogLevel } from "miniflare";
+import { fetch as mockFetch, MockAgent } from "undici";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -89,7 +89,7 @@ try {
   assert.ok(!/\<script\b(?![^>]*\bnonce=)/i.test(html));
   // Enable the transport only in this disposable Worker, with all network
   // destinations intercepted. This never opens or contacts an Apple account.
-  const fetchMock = createFetchMock(); fetchMock.disableNetConnect();
+  const fetchMock = new MockAgent(); fetchMock.disableNetConnect();
   const fixtures = JSON.parse(await readFile(join(root, "tests/fixtures/protocol.json"), "utf8")); const f = fixtures.srp[0];
   const apple = fetchMock.get("https://idmsa.apple.com");
   apple.intercept({ path: /\/appleauth\/auth\/authorize\/signin\?/, method: "GET" }).reply(200, "synthetic authorization");
