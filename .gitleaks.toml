@@ -1,0 +1,12 @@
+# Keep every default secret rule. Only these five invented create/retry UUIDs
+# in this exact synthetic acceptance fixture are false positives.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Invented reminder idempotency UUIDs; not authentication credentials"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^tests/integration/reminder-writes\.mjs$''']
+regexTarget = "secret"
+regexes = ['''^(46cf8eef-6cab-4aa2-a725-219769337d8b|d92b886c-0f7a-4b48-b497-4fc88a97a2e4|1cdf7593-e38e-4b34-a01d-7962fc67d237|08b44b21-e311-4ef1-bb51-17fa343d0b6f|6734def8-8505-47ab-8145-0f41020d77e4)$''']
