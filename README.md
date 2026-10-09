@@ -10,7 +10,7 @@
 </p>
 
 A remote MCP server for your iCloud Reminders, with a private connection dashboard. Reads are
-enabled after connecting; reminder creation and editing require a separate operator opt-in.
+enabled after connecting, along with creation, editing, completion, reopening and deletion.
 Deploy it through **ChatGPT Sites** or to your own **Cloudflare Worker** protected by Cloudflare
 Access and Managed OAuth. No containers, Python runtime, KV namespace or Durable Objects are required.
 
@@ -21,8 +21,8 @@ are fetched from Apple when requested and are not cached in D1.
 **Experimental, unofficial integration.** This project uses Apple's undocumented web protocols,
 not Sign in with Apple or an official Reminders API. The login page is served by your deployment;
 you must trust its browser code with your password input. Cryptographic reference tests are not an
-independent security audit. Creating, editing, completing, reopening and soft-deleting reminders are experimental and
-disabled by default. State changes require the separate v2 write approval.
+independent security audit. Reminder reads and mutations use unofficial Apple protocols;
+review the supported fields and limitations before using them.
 
 ## Table of contents
 
@@ -66,11 +66,11 @@ Review Git history before publishing a repository that previously contained priv
 | `get_reminder` | Read one exact ID, including completed or soft-deleted state, for current version tags and recovery. |
 | `get_reminders` | Synchronize the catalogue, then fetch one current page for a `listId`; open reminders by default. |
 | `get_all_open_reminders` | Synchronize the catalogue, then fetch open reminders across every discovered selectable list. |
-| `create_reminder` | Create one open reminder using a stable UUID `idempotencyKey`; requires write opt-in. |
-| `update_reminder` | Edit specified fields of one open reminder using its current `recordChangeTag`; requires write opt-in. |
-| `complete_reminder` | Complete one open reminder using its current version; requires v2 write opt-in. |
-| `reopen_reminder` | Reopen one completed reminder and clear its completion date; requires v2 write opt-in. |
-| `delete_reminder` | Soft-delete one open or completed reminder using its current version; requires v2 write opt-in. |
+| `create_reminder` | Create one open reminder using a stable UUID `idempotencyKey`. |
+| `update_reminder` | Edit specified fields of one open reminder using its current `recordChangeTag`. |
+| `complete_reminder` | Complete one open reminder using its current version. |
+| `reopen_reminder` | Reopen one completed reminder and clear its completion date. |
+| `delete_reminder` | Soft-delete one open or completed reminder using its current version. |
 
 Tools return `structuredContent` plus a text copy for client compatibility. Every tool advertises
 a typed output schema for successful results and describes its parameters in the input schema.
@@ -90,12 +90,11 @@ before retrying and respect any `retryAfterSeconds`. A partial result is not the
 
 ## Reminder write access
 
-Writes default to disabled in both deployment modes and the local launcher. After reviewing
-[the write protocol and limitations](docs/write-access.md), set the runtime variable
-`LIVE_APPLE_WRITES_APPROVED=controlled-reminder-writes-v2` alongside the two existing Apple login
-approvals. Set it through Sites' private runtime configuration or your ignored standalone
-configuration; keep the checked-in template empty. `connection_status` then reports
-`writeEnabled` and the create/update/complete/reopen/delete capabilities when the Apple session is ready.
+Creation, editing, completion, reopening and soft deletion are available to the authenticated
+owner once the Apple session is ready, in both deployment modes and the local launcher. There
+is no separate write approval flag. Review [the write protocol and limitations](docs/write-access.md).
+`connection_status` reports `writeEnabled` and the create/update/complete/reopen/delete
+capabilities based on the current connection state.
 
 Use `get_reminder_lists` to select a list and `get_reminders` to obtain reminder IDs and current
 version tags. Creates need a new UUID `idempotencyKey` for each distinct reminder; reuse that
@@ -112,9 +111,8 @@ editing are excluded.
 `CONFLICT` requires a fresh read and review. `WRITE_OUTCOME_UNKNOWN` means Apple may have saved
 the change: read the indicated reminder before retrying, and never choose a new creation key
 for that attempt. No mutation tool automatically retries writes or bypasses version conflicts.
-Review the PR and use a dedicated test reminder for your first live test. The [local acceptance procedure](docs/write-access.md#local-live-acceptance)
+Use a dedicated test reminder for your first live test. The [local acceptance procedure](docs/write-access.md#local-live-acceptance)
 includes a command that creates, edits, completes, reopens and deletes only its own test item.
-The older `controlled-create-edit-v1` approval remains limited to creation and editing.
 
 ## Resources and configuration
 
@@ -139,14 +137,14 @@ cryptography and your Access configuration; validate those limits in your deploy
 | `ENCRYPTION_KEYS_JSON` **secret** | JSON key ring, for example `{"primary":"<32-byte base64 key>"}`. |
 | `LIVE_APPLE_CONNECTION_APPROVED` | `controlled-device-v2` enables the operator-approved account test. |
 | `APPLE_CRYPTO_REVIEW_APPROVED` | `device-proof-v2` acknowledges the operator's review of the browser proof protocol. |
-| `LIVE_APPLE_WRITES_APPROVED` | Optional: `controlled-reminder-writes-v2` enables bounded mutations after operator review; `controlled-create-edit-v1` enables only create/edit. Empty by default. |
 | `TEAM_DOMAIN` | Standalone only: `https://<team>.cloudflareaccess.com`. |
 | `POLICY_AUD` | Standalone only: Access application's audience tag. |
 | `CATALOGUE_BACKGROUND_RUNNER` | Optional: `cron` only with an actual standalone Cron trigger; local launcher sets `local`. |
 
-The three Apple approval settings default to empty. They are operator acknowledgements, not a review
+The two Apple login approval settings default to empty. They are operator acknowledgements, not a review
 or audit performed by the software. Do not enable them before reviewing the trust boundary and
-accepting a controlled account test. Enabling login alone does not enable reminder creation or editing.
+accepting the account connection. A ready authenticated Apple connection enables reads and the
+supported reminder mutations.
 
 ## Local setup
 
@@ -182,15 +180,9 @@ the stored session. Its ignored `.sites-runtime/local-icloud/` is private accoun
 
 Local tests and CI use synthetic data and do not require an Apple account.
 
-To explicitly opt into controlled local reminder-write testing after reviewing the protocol:
-
-```bash
-npm run build
-npm run dev:icloud -- --enable-writes
-```
-
-This starts the existing dashboard with write tools enabled for its isolated local session.
-Use a dedicated test reminder. The normal launcher remains read-only. The diagnostic command
+The normal local launcher supports reminder changes after sign-in. Use a dedicated test reminder
+for the acceptance procedure in [the write documentation](docs/write-access.md#local-live-acceptance).
+The diagnostic command
 `node scripts/dev/inspect-local-icloud.mjs write-shapes` performs bounded reads and reports only
 field types/version presence; it does not submit a write or print reminder contents.
 
@@ -361,11 +353,8 @@ Sign in to your private workspace, then select **Connect Apple account**. The st
 shows whether Apple is connected, Reminders access is ready, lists have been found and the
 initial list scan is complete.
 
-- Opening the dashboard with a ready Apple connection automatically starts or resumes the list
-  scan, or checks for changes after a completed scan. Explicitly paused automatic checks are
-  respected. **Pause scan** stops the current browser request and stays paused for this visit;
-  **Continue list scan** resumes saved progress. A scan pass stops after five minutes or its
-  1,000-page safety limit. Keep the page open while scanning.
+- **Start list scan** finds your lists. **Pause scan** stops the current browser request;
+  **Continue list scan** resumes from saved progress. Keep the page open during manual scans.
 - **Check for updates** reads changes after the saved checkpoint once the initial scan is complete.
 - **Preview reminders** lets you choose a list and show its open reminders, with an option to
   include completed reminders. **Show more reminders** reads another bounded page.

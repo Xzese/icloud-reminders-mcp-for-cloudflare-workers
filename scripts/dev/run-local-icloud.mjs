@@ -8,8 +8,7 @@ import { localAppleHeaders, summarizeAppleResponse, summarizeAppleFailure } from
 import { createLocalPushRelay } from "./local-icloud-push.mjs";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
-if (process.argv.slice(2).some(argument => argument !== "--enable-writes")) throw new Error("Use npm run dev:icloud [-- --enable-writes].");
-const enableLocalWrites = process.argv.includes("--enable-writes");
+if (process.argv.length > 2) throw new Error("Use npm run dev:icloud.");
 const state = join(root, ".sites-runtime/local-icloud");
 await mkdir(state, { recursive: true, mode: 0o700 });
 await chmod(state, 0o700);
@@ -45,7 +44,7 @@ const worker = new Miniflare({
     { name: "local-reminders-app", modulesRoot: serverRoot,
       modules: [entrypoint, ...paths.filter(p => p !== entrypoint)].map(path => ({ type: "ESModule", path })),
       compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
-      bindings: { CATALOGUE_BACKGROUND_RUNNER: "local", APP_ORIGIN: origin, REMINDERS_OWNER_ID: keys.owner, ENCRYPTION_KEY_ID: "local-live", ENCRYPTION_KEYS_JSON: JSON.stringify({ "local-live": keys.key }), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2", LIVE_APPLE_WRITES_APPROVED: enableLocalWrites ? "controlled-reminder-writes-v2" : "" },
+      bindings: { CATALOGUE_BACKGROUND_RUNNER: "local", APP_ORIGIN: origin, REMINDERS_OWNER_ID: keys.owner, ENCRYPTION_KEY_ID: "local-live", ENCRYPTION_KEYS_JSON: JSON.stringify({ "local-live": keys.key }), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" },
       d1Databases: { DB: "isolated-local-icloud" },
       assets: { directory: join(root, "dist/client"), routerConfig: { has_user_worker: true } },
       outboundService: async request => {
@@ -54,7 +53,6 @@ const worker = new Miniflare({
         const fixed = ["idmsa.apple.com", "setup.icloud.com", "www.icloud.com"].includes(url.hostname);
         const cloudkit = /^p\d{1,3}-ckdatabasews\.icloud\.com$/.test(url.hostname) && (/^\/database\/1\/com\.apple\.reminders\/production\/private(?:\/|$)/.test(url.pathname) || /^\/database\/1\/com\.apple\.reminders\/production\/shared\/(?:zones\/list|records\/lookup)$/.test(url.pathname));
         if (url.protocol !== "https:" || url.username || url.password || url.port || (!fixed && !cloudkit)) return new WorkerResponse("Unsupported local test endpoint.", { status: 403 });
-        if (url.pathname.endsWith("/records/modify") && !enableLocalWrites) return new WorkerResponse("Local reminder writes are disabled.", { status: 403 });
         const startedAt = Date.now(), deadline = AbortSignal.timeout(8000);
         let total = 0, stage = "headers", status = null;
         try {
@@ -98,6 +96,6 @@ try {
   console.log(`Local Worker ready: ${origin}/`);
   void backgroundTick();
   console.log("The initial catalogue scan runs in the background. After completion, hourly catalogue checks and on-demand MCP reads fetch incremental updates.");
-  console.log(`Separate encrypted local session; reminder ${enableLocalWrites ? "creation, editing, completion, reopening and deletion enabled" : "writes disabled"}. Diagnostics contain metadata and counts only.`);
+  console.log("Separate encrypted local session; reminder creation, editing, completion, reopening and deletion are available after sign-in. Diagnostics contain metadata and counts only.");
 } catch (error) { closing = true; clearInterval(backgroundTimer); push.close(); await worker.dispose(); throw error; }
 for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => { closing = true; clearInterval(backgroundTimer); push.close(); await worker.dispose(); await logQueue; process.exit(0); });

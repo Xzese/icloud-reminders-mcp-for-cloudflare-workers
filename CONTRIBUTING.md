@@ -45,7 +45,7 @@ identity and provisioning requirements.
 MCP tool names, schemas, annotations, continuations and structured outputs are public interfaces.
 Changes should be intentional, documented and covered by representative behavioural tests.
 Preserve generation fencing, encrypted owner-bound storage, request bounds and fail-closed
-protocol handling. Create/edit changes must preserve the separate write gate, exact target lookups,
+protocol handling. Create/edit changes must preserve the ready Apple session requirement, exact target lookups,
 change-tag conflicts and uncertain-outcome recovery. Do not expand mutation scope or weaken
 authentication incidentally. Use only synthetic write responses in CI; live validation requires
 a dedicated test reminder and explicit operator opt-in.

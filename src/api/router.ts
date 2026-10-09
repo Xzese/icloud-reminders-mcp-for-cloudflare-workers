@@ -4,7 +4,7 @@ import { handleMCP } from "../mcp/handler.ts";
 import { limitedBytes } from "../transport/apple-http.ts";
 import { appleAuthSocket } from "../auth/socket.ts";
 import { AppleConnectionService, ControlledRead, ResumeRequest } from "../auth/service.ts";
-import { appleGates, requireAppleEnabled, requireAppleWritesEnabled } from "../auth/gates.ts";
+import { appleGates, requireAppleEnabled } from "../auth/gates.ts";
 import { credentialDocument, credentialScript } from "../auth/credential-page.ts";
 
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
@@ -53,7 +53,7 @@ export async function applicationRoute(request: Request, env: RuntimeEnv, creden
         return json(await service.read(parsed.data));
       }
       if (path === "/api/mutations") {
-        requireAppleWritesEnabled(env);
+        requireAppleEnabled(env);
         const bytes = await limitedBytes(new Response(request.body, { headers: request.headers }), 65_536);
         let value: unknown;
         try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new AppError("VALIDATION_ERROR", "Provide a valid reminder mutation request.", 400); }

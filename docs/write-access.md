@@ -1,19 +1,14 @@
 # Create, edit, complete and delete reminders
 
-The experimental reminder mutation MCP tools use Apple's modern private
-CloudKit Reminders database. Writes are disabled by default. They require the authenticated
-deployment owner, a ready unexpired Apple session and the separate runtime setting:
+The reminder mutation MCP tools use Apple's modern private CloudKit Reminders database.
+Creation, editing, completion, reopening and soft deletion require the authenticated deployment
+owner and a ready, unexpired Apple session. They are normal connected-account capabilities;
+there is no separate write-approval setting. Owner, origin, session, exact-zone lookup and
+record-version checks remain enforced on every request.
 
-```text
-LIVE_APPLE_WRITES_APPROVED=controlled-reminder-writes-v2
-```
-
-This v2 approval enables creation, editing, completion, reopening and soft deletion. The older
-`controlled-create-edit-v1` value remains limited to creation and editing. The two existing
-login approvals must also be enabled. Use private runtime configuration;
-leave public templates empty. For the isolated local Worker, explicitly launch
-`npm run dev:icloud -- --enable-writes` after building. The dashboard shows whether write
-access is enabled; it does not silently grant access or offer a general-purpose record editor.
+The two login approvals must be configured privately before connecting Apple. For the isolated
+local Worker, run `npm run dev:icloud` after building. The dashboard reports connection and
+mutation availability; it does not expose a general-purpose Apple record editor.
 
 ## Supported fields
 
@@ -60,7 +55,7 @@ These IDs and text are invented examples:
   "listId": "List/00000000-0000-4000-8000-000000000001",
   "idempotencyKey": "00000000-0000-4000-8000-000000000002",
   "title": "Test reminder",
-  "notes": "Created through the controlled MCP tool",
+  "notes": "Created through the MCP tool",
   "priority": 0,
   "flagged": false
 }
@@ -142,8 +137,7 @@ and [annotation definitions](https://modelcontextprotocol.io/specification/2025-
 1. Use a uniquely named, unshared iCloud list such as **MCP Test**. The test targets only its
    own labelled synthetic item. Allow the list to appear in iCloud.
 2. Run `npm run install:ci` and `npm run build`. Stop any earlier local Worker, then launch
-   `npm run dev:icloud -- --enable-writes`. This explicitly opts the isolated local Worker
-   into the v2 mutation gate; it does not alter hosted settings.
+   `npm run dev:icloud`. It uses a separate encrypted local session.
 3. Open `http://127.0.0.1:5173/`, finish Apple sign-in/device approval if required, and wait
    for **Ready** and a finished catalogue scan.
 4. Explicitly run the one-item test:
@@ -160,7 +154,7 @@ and [annotation definitions](https://modelcontextprotocol.io/specification/2025-
    Each phase has a three-minute budget; reads are limited to five pages and requests to 40 seconds.
    No write is automatically retried. Personal contents, account/list IDs, cookies, tags and raw
    Apple responses are not printed. A failed or uncertain step stops before further mutations.
-5. Stop the Worker and restart without `--enable-writes`. A successful test removes its item
+5. Stop the Worker when finished. A successful test removes its item
    from the normal list; if it stops earlier, inspect the retained ID in Apple's app before cleanup.
 
 To finish a **known, previously created and edited** item from this script, use its retained key:
@@ -198,6 +192,6 @@ the completed and deleted item was absent. Stale-version deletion was rejected. 
 the isolated local Worker and Apple API responses; Apple's app was not visually inspected.
 These results do not independently audit the codec or establish every linked-record workflow.
 
-Validate a dedicated test reminder before using write access on personal items. Disable writes
-when testing is finished until you accept the results. Keep credentials and verification codes
+Validate a dedicated test reminder before using write access on personal items. Disconnect Apple
+or stop the local Worker when account access is no longer needed. Keep credentials and verification codes
 on the dedicated connection page, never in MCP arguments or chat.

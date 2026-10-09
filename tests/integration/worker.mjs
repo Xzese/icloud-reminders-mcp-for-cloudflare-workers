@@ -226,7 +226,7 @@ try {
   await sessionDB.prepare(schema).run();
   assert.deepEqual((await sessionDB.prepare("SELECT * FROM apple_session_state").all()).results, beforeSchemaRepeat);
   await worker.dispose(); worker = new Miniflare(withScheduler(enabledOptions));
-  const restoredApple = await (await request("/api/connection")).json(); assert.equal(restoredApple.state, "READY"); assert.equal(restoredApple.capabilities.liveRead, true); assert.equal(restoredApple.capabilities.listReminders, true); assert.equal(restoredApple.capabilities.allOpenReminders, true); assert.equal(restoredApple.liveReadValidated, undefined); assert.equal(restoredApple.validation.fullProductAcceptance, false); assert.equal(restoredApple.writeEnabled, false);
+  const restoredApple = await (await request("/api/connection")).json(); assert.equal(restoredApple.state, "READY"); assert.equal(restoredApple.capabilities.liveRead, true); assert.equal(restoredApple.capabilities.listReminders, true); assert.equal(restoredApple.capabilities.allOpenReminders, true); assert.equal(restoredApple.liveReadValidated, undefined); assert.equal(restoredApple.validation, undefined); assert.equal(restoredApple.writeEnabled, true);
   const discoveredReply = await request("/api/apple/read", { method: "POST", body: { action: "discover", expectedGeneration: empty.generation } });
   const discoveredZone = await discoveredReply.json(); assert.equal(discoveredReply.status, 200, JSON.stringify(discoveredZone));
   assert.equal(discoveredZone.result.available, true); assert.equal(discoveredZone.result.remindersZone.zoneID.ownerRecordName, undefined);
@@ -266,7 +266,7 @@ try {
   const sharedDiagnostic = await request("/api/apple/read", { method: "POST", body: { action: "probe-shared-lists", expectedGeneration: empty.generation, listIds: ["List/MISSING"] } });
   const sharedValue = await sharedDiagnostic.json(); assert.equal(sharedDiagnostic.status, 200, JSON.stringify(sharedValue));
   assert.equal(sharedValue.result.database, "shared"); assert.equal(sharedValue.result.zonesDiscovered, 0); assert.deepEqual(sharedValue.result.lookups, []);
-  assert.equal(sharedValue.result.contentsReturned, false); assert.equal(sharedValue.writesEnabled, false);
+  assert.equal(sharedValue.result.contentsReturned, false); assert.equal(sharedValue.writesEnabled, true);
   const compoundResponse = await request("/api/apple/read", { method: "POST", body: { action: "reminders", expectedGeneration: empty.generation, listId: "List/SYNTHETIC", includeCompleted: true, limit: 1 } });
   const compound = await compoundResponse.json(); assert.equal(compoundResponse.status, 200, JSON.stringify(compound)); assert.equal(compound.result.records.length, 1); assert.equal(compound.result.auxiliaryRecordCounts.Alarm, 1); assert.equal(compound.result.auxiliaryRecordCounts.List, 1); assert.equal(compound.result.auxiliaryDetailsIncluded, true); assert.equal(compound.liveReadValidated, false);
   assert.equal(compoundResponse.headers.get("cache-control"), "private, no-store");
@@ -285,7 +285,7 @@ try {
   concurrentBatch.responses.get("List/BATCH-B")(batchReply("List/BATCH-B", { "set-cookie": "batch-b=second; Domain=icloud.com; Path=/; Secure" }));
   concurrentBatch.responses.get("List/BATCH-A")(batchReply("List/BATCH-A", { "set-cookie": "batch-a=first; Domain=icloud.com; Path=/; Secure" }));
   const batchResponse = await batchRead; const batchValue = await batchResponse.json();
-  assert.equal(batchResponse.status, 200, JSON.stringify(batchValue)); assert.equal(batchValue.writesEnabled, false);
+  assert.equal(batchResponse.status, 200, JSON.stringify(batchValue)); assert.equal(batchValue.writesEnabled, true);
   assert.deepEqual(batchValue.result.pages.map(page => page.listId), batchBody.listIds);
   for (const page of batchValue.result.pages) {
     assert.equal(page.records.length, 1); assert.equal(page.records[0].listId, page.listId);
@@ -390,10 +390,10 @@ try {
     "List/ALL-A": [{ reply: { records: [allReminder("Reminder/A1", "List/ALL-A")], continuationMarker: "all-a-next" } }, { inputCursor: "all-a-next", reply: { records: [allReminder("Reminder/A2", "List/ALL-A"), allReminder("Reminder/CLOSED", "List/ALL-A", 1), { ...allReminder("Reminder/DELETED", "List/ALL-A"), deleted: true }] } }],
     "List/ALL-B": [{ reply: { records: [allReminder("Reminder/B1", "List/ALL-B")] } }],
   } };
-  const readStatus = await mcp("tools/call", { name: "connection_status", arguments: {} }); assert.equal(readStatus.result.structuredContent.capabilities.listReminders, true); assert.equal(readStatus.result.structuredContent.capabilities.create, false);
+  const readStatus = await mcp("tools/call", { name: "connection_status", arguments: {} }); assert.equal(readStatus.result.structuredContent.capabilities.listReminders, true); assert.equal(readStatus.result.structuredContent.capabilities.create, true);
   const allOpenReply = await mcp("tools/call", { name: "get_all_open_reminders", arguments: {} }); assert.ok(!allOpenReply.result.isError, JSON.stringify(allOpenReply));
   const allOpen = allOpenReply.result.structuredContent;
-  assert.equal(allOpen.complete, true); assert.equal(allOpen.continuation, null); assert.equal(allOpen.writesEnabled, false);
+  assert.equal(allOpen.complete, true); assert.equal(allOpen.continuation, null); assert.equal(allOpen.writesEnabled, true);
   assert.deepEqual(allOpen.progress, { listsTotal: 3, listsCompleted: 3, pagesRead: 4, totalPages: 4 });
   assert.deepEqual(allOpen.records.map(record => record.id).sort(), ["Reminder/A1", "Reminder/A2", "Reminder/B1"]);
   assert.equal(allOpen.recordErrors.length, 0); assert.equal(allOpenScenario.requests.length, 4);

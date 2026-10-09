@@ -40,8 +40,6 @@ export default function ControlledReadPanel({ generation, onSessionRejected, onS
   const [catalogueAuto, setCatalogueAuto] = useState<CatalogueAuto | null>(null);
   const [scanMessage, setScanMessage] = useState("");
   const [scanning, setScanning] = useState(false);
-  const [restored, setRestored] = useState(false);
-  const automaticScanStarted = useRef(false);
 
   const [catalogueRecords, setCatalogueRecords] = useState(0);
   const [includeCompleted, setIncludeCompleted] = useState(false);
@@ -53,7 +51,6 @@ export default function ControlledReadPanel({ generation, onSessionRejected, onS
     const controller = new AbortController(); active.current = controller;
     void read<Page>({ action: "saved-lists", expectedGeneration: generation }, controller.signal).then(result => {
       if (active.current !== controller) return;
-      setRestored(true);
       setLists(mergeCatalogueChoices([], result)); setCatalogueSync(result.catalogueSync ?? null); setCatalogueAuto(result.catalogueAuto ?? null); setListPages(result.catalogueSync?.pages ?? 0); setListPage({ ...result, records: [] });
       if (result.records.length) { setListPage({ ...result, records: [] }); setScanMessage("Your saved lists are ready. Continue your scan or check for updates."); }
     }).catch(e => { if (active.current === controller && !controller.signal.aborted) failed(e, "Saved lists could not be restored."); }).finally(() => { if (active.current === controller) { active.current = null; setBusy(false); } });
@@ -69,7 +66,6 @@ export default function ControlledReadPanel({ generation, onSessionRejected, onS
         const saved = await read<Page>({ action: "saved-lists", expectedGeneration: generation }, controller.signal);
         if (stopped || active.current !== controller) return;
         if (listId && !saved.records.some(item => item.id === listId && selectableList(item))) { setListId(""); setPage(null); setReminders([]); setRelatedRecords([]); setPages(0); }
-        setRestored(true);
         setLists(mergeCatalogueChoices([], saved)); setCatalogueSync(saved.catalogueSync ?? null); setCatalogueAuto(saved.catalogueAuto ?? null); setListPages(saved.catalogueSync?.pages ?? 0); setListPage({ ...saved, records: [] });
       } catch (e) {
         if (!stopped && !controller.signal.aborted && e instanceof ReadError && ["NOT_CONNECTED", "REAUTH_REQUIRED", "AUTH_EXPIRED", "VERIFICATION_REQUIRED", "TERMS_ACTION_REQUIRED"].includes(e.code ?? "")) failed(e, "Reconnect your Apple account.");
@@ -91,9 +87,8 @@ export default function ControlledReadPanel({ generation, onSessionRejected, onS
     } catch (e) { if (active.current === controller && !controller.signal.aborted) failed(e, "Automatic check settings could not be changed."); }
     finally { if (active.current === controller) { active.current = null; setBusy(false); } }
   }
-  const loadLists = useCallback(async (restart = false) => {
+  async function loadLists(restart = false) {
     if (disabled || active.current) return;
-    automaticScanStarted.current = true;
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setScanning(true); setError(""); setScanMessage("Looking for your lists…");
     setCatalogueTrace([]); setCatalogueRecords(0);
@@ -127,15 +122,7 @@ export default function ControlledReadPanel({ generation, onSessionRejected, onS
       setScanMessage(messages[result.reason]);
     } catch (e) { if (active.current === controller) { if (controller.signal.aborted) setScanMessage("Scan paused. Your progress is saved and you can continue later."); else { failed(e, "Lists are unavailable."); setScanMessage("Scan stopped. Progress remains saved. Continue scanning to pick up where you left off."); } } }
     finally { if (active.current === controller) { active.current = null; setBusy(false); setScanning(false); } }
-  }, [disabled, generation, failed]);
-  useEffect(() => {
-    if (!restored || disabled || busy || active.current || automaticScanStarted.current || catalogueAuto?.enabled === false || catalogueAuto?.pausedForError) return;
-    const timer = setTimeout(() => {
-      if (active.current || automaticScanStarted.current) return;
-      void loadLists();
-    }, 0);
-    return () => clearTimeout(timer);
-  }, [restored, disabled, busy, catalogueAuto, loadLists]);
+  }
   async function lookupKnownLists(refreshSaved = false) {
     if (disabled || active.current) return;
     const listIds = [...new Set(knownListInput.match(/List\/[A-Za-z0-9_-]+/g) ?? [])];
@@ -181,7 +168,7 @@ export default function ControlledReadPanel({ generation, onSessionRejected, onS
   const scanButton = scanning ? "Scanning lists…" : catalogueSync?.pending ? "Continue list scan" : catalogueSync?.initialComplete ? "Scan lists" : "Start list scan";
   return <>
     <section className="dashboard-card" aria-labelledby="lists-title">
-      <div className="card-heading"><div className="card-icon"><ListChecks size={22} aria-hidden="true" /></div><div><h2 id="lists-title">Your lists</h2><p>We check your lists automatically when this page opens, continuing any saved scan.</p></div><span className="status-pill">{choices.length} {choices.length === 1 ? "list" : "lists"}</span></div>
+      <div className="card-heading"><div className="card-icon"><ListChecks size={22} aria-hidden="true" /></div><div><h2 id="lists-title">Your lists</h2><p>Find your lists once, then check for new or changed lists.</p></div><span className="status-pill">{choices.length} {choices.length === 1 ? "list" : "lists"}</span></div>
       <div className="action-row"><Button className="action-primary" disabled={locked} onClick={() => void loadLists()}><Play size={16} aria-hidden="true" />{scanButton}</Button><Button variant="outline" disabled={locked || !catalogueSync?.initialComplete} onClick={() => void loadLists()}><RefreshCw size={16} aria-hidden="true" />Check for updates</Button>{scanning && <Button variant="ghost" onClick={() => active.current?.abort()}><Square size={14} aria-hidden="true" />Pause scan</Button>}</div>
       <div className="scan-summary"><div className="scan-summary-top"><strong>{scanning ? "Finding your lists" : scanFinished ? "List scan complete" : catalogueSync?.pending ? "Scan ready to continue" : choices.length ? "Saved lists ready" : "Ready to find your lists"}</strong><span>{listPages} pages checked</span></div>{scanning && <progress className="scan-progress" aria-label="List scan in progress; total page count unknown" />}<div className="scan-stats"><span>{choices.length} lists found</span>{catalogueSync?.updatedAt && <span>Last checked {new Date(catalogueSync.updatedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>}</div>{scanMessage && <p className="fine-print" role="status">{scanMessage}</p>}</div>
       <p className="fine-print">{scanning ? "Keep this page open while scanning. You can pause and continue later." : catalogueAuto?.runner === "unavailable" ? "ChatGPT also checks for list updates when you ask for reminders." : catalogueAuto?.enabled && !catalogueAuto.pausedForError ? "Automatic list checks are enabled. ChatGPT also checks when you ask for reminders." : "Check here or ask ChatGPT to refresh your lists."}</p>

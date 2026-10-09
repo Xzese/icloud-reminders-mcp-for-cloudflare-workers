@@ -34,13 +34,13 @@ bounded initial and incremental synchronization, then live reminder queries. Rem
 not persisted. Optional standalone scheduled events reuse the same fenced catalogue operation.
 Neither a background-handler declaration nor browser polling provisions a recurring trigger.
 
-Optional reminder creation/editing uses the same private CloudKit transport and session lease.
-`LIVE_APPLE_WRITES_APPROVED` must explicitly enable the bounded write gate; login permission alone
-does not allow writes. Exact lookups verify the current list and reminder before dispatch.
+Reminder creation, editing, completion, reopening and deletion use the same private CloudKit
+transport and session lease. They require the bound authenticated owner and a ready unexpired
+Apple session, with no separate write-approval flag. Exact lookups verify the current list and reminder before dispatch.
 Creates derive the Apple record ID from the caller's UUID idempotency key, while updates send
 only changed fields with an exact server change tag. Resolution tokens for untouched fields
 are retained. Reminder content and mutation receipts are not cached in D1, and no new database
-table or resource is required. The protocol rejects force-update, replacement and deletion.
+table or resource is required. The protocol rejects force-update, replacement and hard deletion; soft deletion uses a tagged update.
 
 Writes are never automatically retried or redirected. An uncertain upstream response or a lost
 session fence after submission returns `WRITE_OUTCOME_UNKNOWN`; local fencing cannot undo an

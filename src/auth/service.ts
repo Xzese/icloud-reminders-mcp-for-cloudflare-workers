@@ -7,7 +7,7 @@ import { CreateReminderInput, UpdateReminderInput, ReminderTargetInput, buildCre
 import { decodeDocument } from "../reminders/crdt.ts";
 import { AppleAuthHTTP } from "./apple/http.ts";
 import { advancePcs } from "./apple/pcs.ts";
-import { appleDisabledMessage, appleGates, requireAppleEnabled, requireAppleWritesEnabled, requireAppleLifecycleWritesEnabled } from "./gates.ts";
+import { appleDisabledMessage, appleGates, requireAppleEnabled } from "./gates.ts";
 
 export const ResumeRequest = z.object({ expectedGeneration: z.number().int().nonnegative().safe() }).strict();
 export const ReminderMutation = z.discriminatedUnion("action", [
@@ -85,6 +85,7 @@ function failedCatalogueAuto(session: AppleSession, error: unknown): CatalogueAu
     nextCheckAt: transient ? Math.min(session.login.expiresAt, failedAt + Math.max(localDelay, serverDelay)) : null, runId: null, runUntil: 0 };
   return failedAuto;
 }
+
 function syncInProgress() {
   return new AppError("SYNC_IN_PROGRESS", "Catalogue synchronization is unfinished. Call the same reminder tool again to continue from the saved checkpoint. No reminder results have been returned yet.", 409, true);
 }
@@ -131,8 +132,8 @@ export class AppleConnectionService {
     const session = await new AppleSessionRepository(this.env, this.owner).status();
     const readsAvailable = gates.enabled && session.transportReady;
     const { liveReadValidated: _legacyValidation, ...connection } = session;
-    const writesAvailable = readsAvailable && gates.writesEnabled;
-    return { ...connection, gates, connected: readsAvailable, writeEnabled: writesAvailable, phase: writesAvailable ? (gates.lifecycleWritesEnabled ? "controlled-reminder-writes" : "controlled-create-edit") : "read-only", capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: writesAvailable, update: writesAvailable, complete: readsAvailable && gates.lifecycleWritesEnabled, reopen: readsAvailable && gates.lifecycleWritesEnabled, delete: readsAvailable && gates.lifecycleWritesEnabled }, validation: { fullProductAcceptance: false, liveWriteAcceptance: false }, mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_reminder", "get_all_open_reminders", "create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "delete_reminder"], message: !gates.enabled ? appleDisabledMessage(gates) : session.state === "READY" ? (writesAvailable ? (gates.lifecycleWritesEnabled ? "Controlled reminder creation, editing, completion, reopening and deletion are enabled. Use current list IDs and reminder version tags." : "Controlled reminder creation and editing are enabled. Completion, reopening and deletion require the separate v2 write approval.") : "Read-only reminder tools are available. Use get_all_open_reminders for current open reminders across all lists. Reminder reads automatically start or resume catalogue scanning. If a bounded scan is unfinished, repeat the tool after SYNC_IN_PROGRESS to continue saved progress. Reminder changes remain disabled.") : session.state === "DEVICE_APPROVAL_PENDING" ? (session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again.") : "Connect your Apple account through the private Site's secure connection form." };
+    const writesAvailable = readsAvailable;
+    return { ...connection, gates, connected: readsAvailable, writeEnabled: writesAvailable, phase: writesAvailable ? "read-write" : "read-only", capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: writesAvailable, update: writesAvailable, complete: writesAvailable, reopen: writesAvailable, delete: writesAvailable }, mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_reminder", "get_all_open_reminders", "create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "delete_reminder"], message: !gates.enabled ? appleDisabledMessage(gates) : session.state === "READY" ? "You can read, create, edit, complete, reopen and delete reminders. Use current IDs and version tags." : session.state === "DEVICE_APPROVAL_PENDING" ? (session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again.") : "Connect your Apple account through the private Site's secure connection form." };
   }
   async disconnect() { return await new AppleSessionRepository(this.env, this.owner).disconnect(); }
   async readReminderForMCP(expectedGeneration: number, listId: string, reminderId: string) {
@@ -157,12 +158,11 @@ export class AppleConnectionService {
     });
   }
   async mutate(value: unknown) {
-    // The deployment gate precedes parsing, storage access and Apple requests.
-    requireAppleWritesEnabled(this.env);
+    // Login availability precedes parsing, storage access and Apple requests.
+    requireAppleEnabled(this.env);
     const parsed = ReminderMutation.safeParse(value);
     if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Provide a bounded reminder mutation request with the current session generation.", 400);
     const input = parsed.data;
-    if (input.action !== "create" && input.action !== "update") requireAppleLifecycleWritesEnabled(this.env);
     const targetId = input.action === "create" ? `Reminder/${input.idempotencyKey.toUpperCase()}` : input.reminderId;
     let applied = false;
     try {
@@ -213,7 +213,7 @@ export class AppleConnectionService {
         // A confirmation and cookie save share the existing owner/generation
         // fence. A lost fence after dispatch reports uncertainty, not success.
         await repository.commitResume(fence, { ...session, connection, auth: http.snapshot() }, "READY");
-        return { generation: fence.generation, operation: input.action, replayed, record, writesEnabled: true, liveWriteValidated: false, ...(input.action === "create" ? { idempotencyKey: input.idempotencyKey } : {}) };
+        return { generation: fence.generation, operation: input.action, replayed, record, writesEnabled: true, ...(input.action === "create" ? { idempotencyKey: input.idempotencyKey } : {}) };
       });
     } catch (error) {
       if (applied || error instanceof WriteOutcomeUnknownError) throw new WriteOutcomeUnknownError(targetId, input.action === "create" ? input.idempotencyKey : undefined);
@@ -463,7 +463,7 @@ export class AppleConnectionService {
         throw error;
       }
     }
-    return { result: resultFor(), generation: expectedGeneration, liveReadValidated: false, writesEnabled: appleGates(this.env).writesEnabled };
+    return { result: resultFor(), generation: expectedGeneration, liveReadValidated: false, writesEnabled: appleGates(this.env).enabled };
   }
   async read(input: z.infer<typeof ControlledRead>) { return this.controlledRead(input); }
   private async controlledRead(input: z.infer<typeof ControlledRead>, requireCatalogueReady = false) {
@@ -483,7 +483,7 @@ export class AppleConnectionService {
       } else if (input.action === "sync-catalogue") {
         const synchronized = await this.synchronizeCatalogue(http, saved.session, input);
         await repository.commitResume(fence, synchronized.session, "READY");
-        return { result: synchronized.result, generation: fence.generation, liveReadValidated: false, writesEnabled: appleGates(this.env).writesEnabled };
+        return { result: synchronized.result, generation: fence.generation, liveReadValidated: false, writesEnabled: appleGates(this.env).enabled };
       } else if (input.action === "discover") {
         const discovered = await client.listZones();
         if (client.remindersZoneOwner !== undefined) connection = { ...connection, remindersZoneOwner: client.remindersZoneOwner };
@@ -532,7 +532,7 @@ export class AppleConnectionService {
       // concurrent disconnect prevents both the save and a successful response.
       await repository.commitResume(fence, { ...saved.session, connection, savedLists, catalogueSync, catalogueAuto, auth: http.snapshot() }, "READY");
       result = { ...(result as Record<string, unknown>), catalogueSync: catalogueSyncMetadata(catalogueSync), catalogueAuto: catalogueAutoMetadata(catalogueAuto, catalogueSync, this.env.CATALOGUE_BACKGROUND_RUNNER), requestTrace: client.readTrace };
-      return { result, generation: fence.generation, liveReadValidated: false, writesEnabled: appleGates(this.env).writesEnabled };
+      return { result, generation: fence.generation, liveReadValidated: false, writesEnabled: appleGates(this.env).enabled };
     });
   }
 }

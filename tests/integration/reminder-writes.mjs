@@ -91,7 +91,7 @@ export async function verifyReminderWrites(options) {
   const keyRing = JSON.parse(secret);
   const keyId = options.bindings.ENCRYPTION_KEY_ID;
 
-  const makeWorker = async ({ writes = true, lifecycle = true } = {}) => {
+  const makeWorker = async ({ login = true } = {}) => {
     const state = {
       records: new Map([[listId, listRecord()], [reminderId, reminderRecord(reminderId)],
         ["Reminder/WRITE-RECURRING", reminderRecord("Reminder/WRITE-RECURRING", { recurrence: true })],
@@ -100,11 +100,9 @@ export async function verifyReminderWrites(options) {
     };
     const bindings = {
       ...options.bindings,
-      LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2",
+      LIVE_APPLE_CONNECTION_APPROVED: login ? "controlled-device-v2" : "",
       APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2",
-      ...(writes ? { LIVE_APPLE_WRITES_APPROVED: lifecycle ? "controlled-reminder-writes-v2" : "controlled-create-edit-v1" } : {}),
     };
-    if (!writes) delete bindings.LIVE_APPLE_WRITES_APPROVED;
     const outboundService = async request => {
       const url = new URL(request.url);
       state.requests.push({ method: request.method, path: url.pathname });
@@ -205,13 +203,13 @@ export async function verifyReminderWrites(options) {
 
   let workerHarness;
   try {
-    // The off switch, owner check and origin check all stop before session or Apple state changes.
-    workerHarness = await makeWorker({ writes: false });
+    // Login availability, owner and origin checks stop before session or Apple state changes.
+    workerHarness = await makeWorker({ login: false });
     const gateDB = workerHarness.db;
     const gateBefore = await gateDB.prepare("SELECT * FROM apple_session_state").all();
     const gated = await workerHarness.request("/api/mutations", { method: "POST", body: { action: "create" } });
-    assert.equal(gated.status, 403);
-    assert.equal((await gated.json()).error.code, "UNSUPPORTED_FEATURE");
+    assert.equal(gated.status, 422);
+    assert.equal((await gated.json()).error.code, "UNSUPPORTED_AUTH");
     assert.equal((await workerHarness.request("/api/mutations", { user: "different-owner", method: "POST", body: {} })).status, 403);
     assert.equal((await workerHarness.request("/api/mutations", { method: "POST", requestOrigin: "https://evil.example", body: {} })).status, 403);
     assert.equal((await workerHarness.request("/mcp", { user: "different-owner", method: "POST", body: { jsonrpc: "2.0", id: 1, method: "tools/list" } })).status, 403);
@@ -219,24 +217,20 @@ export async function verifyReminderWrites(options) {
     assert.deepEqual((await gateDB.prepare("SELECT * FROM apple_session_state").all()).results, gateBefore.results);
     await workerHarness.worker.dispose(); workerHarness = undefined;
 
-    // Older create/edit approval must not silently authorize lifecycle actions.
-    workerHarness = await makeWorker({ lifecycle: false });
-    const legacyGeneration = await workerHarness.seedReady();
-    const legacyStatus = await (await workerHarness.request("/api/connection")).json();
-    assert.equal(legacyStatus.writeEnabled, true);
-    assert.equal(legacyStatus.capabilities.complete, false);
-    const beforeLegacy = await workerHarness.db.prepare("SELECT * FROM apple_session_state").all();
-    for (const action of ["complete", "reopen", "delete"]) {
-      const denied = await workerHarness.mcp("tools/call", { name: `${action}_reminder`, arguments: { listId, reminderId, recordChangeTag: `tag-${reminderId}`, expectedGeneration: legacyGeneration } });
-      assert.equal(denied.result.structuredContent.error.code, "UNSUPPORTED_FEATURE");
-    }
-    assert.deepEqual(workerHarness.state.requests, []);
-    assert.deepEqual((await workerHarness.db.prepare("SELECT * FROM apple_session_state").all()).results, beforeLegacy.results);
-    await workerHarness.worker.dispose(); workerHarness = undefined;
-
+    // Every mutation requires a ready Apple session, without a separate write flag.
     workerHarness = await makeWorker();
     const { request, state, mcp } = workerHarness;
+    const disconnectedStatus = await (await request("/api/connection")).json();
+    assert.equal(disconnectedStatus.writeEnabled, false);
+    for (const action of ["complete", "reopen", "delete"]) {
+      const denied = await mcp("tools/call", { name: `${action}_reminder`, arguments: { listId, reminderId, recordChangeTag: `tag-${reminderId}`, expectedGeneration: disconnectedStatus.generation } });
+      assert.equal(denied.result.structuredContent.error.code, "NOT_CONNECTED");
+    }
+    assert.deepEqual(state.requests, []);
     let generation = await workerHarness.seedReady();
+    const readyStatus = await (await request("/api/connection")).json();
+    assert.equal(readyStatus.phase, "read-write"); assert.equal(readyStatus.writeEnabled, true);
+    for (const action of ["create", "update", "complete", "reopen", "delete"]) assert.equal(readyStatus.capabilities[action], true);
 
     const toolsReply = await mcp("tools/list", {});
     const tools = toolsReply.result.tools;
@@ -512,12 +506,12 @@ export async function verifyReminderWrites(options) {
     assert.equal(state.requests.length, beforeExpired);
 
     return { checks: [
-      "write-gate-owner-origin-denial-before-state-or-Apple-access",
+      "login-owner-origin-denial-before-state-or-Apple-access",
       "MCP-discovery-annotations-Unicode-create-and-idempotent-reconciliation",
       "API-title-edit-preserves-notes-and-opaque-Apple-fields",
       "stale-generation-tag-and-Apple-conflict-have-no-force-retry",
       "complete-reopen-and-version-checked-soft-delete-preserve-content",
-      "legacy-write-approval-denies-lifecycle-actions",
+      "all-mutations-require-READY-with-no-separate-write-flag",
       "advertised-output-contracts-parameter-guidance-and-JSON-status-fallback",
       "identical-versioned-mutation-replays-have-no-additional-effect",
       "recurrence-alarms-and-nested-state-writes-refused",

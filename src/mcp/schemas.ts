@@ -95,7 +95,6 @@ export function MutationOutput(action: "create" | "update" | "complete" | "reope
     replayed: z.boolean().describe("True for an identical create reconciled from the existing item without another Apple write."),
     record: ReminderOutput,
     writesEnabled: z.literal(true),
-    liveWriteValidated: z.literal(false).describe("Tool availability is separate from deployment-specific full live acceptance."),
   }).strict();
   return action === "create" ? result.extend({ idempotencyKey: z.string().uuid() }).strict() : result;
 }
@@ -110,20 +109,18 @@ export const ConnectionStatusOutput = z.object({
   expiresAt: nullableTime.describe("Absolute Apple session expiry in Unix milliseconds; reads and writes do not extend it."),
   gates: z.object({
     enabled: z.boolean(), liveConnectionApproved: z.boolean(), cryptographyReviewed: z.boolean(),
-    writesEnabled: z.boolean(), lifecycleWritesEnabled: z.boolean(),
     loginPolicy: z.literal("device-only-v2"), verificationMethod: z.literal("trusted-device-spake2"),
     passwordLocation: z.literal("browser-only"), sessionStorage: z.literal("owner-scoped-encrypted"),
     sessionLifetimeMs: counter, socketLifetimeMs: counter,
   }).strict(),
   connected: z.boolean(),
   writeEnabled: z.boolean(),
-  phase: z.enum(["read-only", "controlled-create-edit", "controlled-reminder-writes"]),
+  phase: z.enum(["read-only", "read-write"]),
   capabilities: z.object({
     liveRead: z.boolean(), controlledRead: z.boolean(), listReminders: z.boolean(),
     allOpenReminders: z.boolean(), search: z.literal(false), create: z.boolean(),
     update: z.boolean(), complete: z.boolean(), reopen: z.boolean(), delete: z.boolean(),
   }).strict(),
-  validation: z.object({ fullProductAcceptance: z.literal(false), liveWriteAcceptance: z.literal(false) }).strict(),
   mcpTools: z.array(z.string()),
   message: z.string(),
 }).strict();

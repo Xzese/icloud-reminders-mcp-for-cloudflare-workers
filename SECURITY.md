@@ -3,7 +3,7 @@
 ## Supported version
 
 Security fixes are applied to the latest version on the default branch. This is an experimental
-integration with reads and opt-in controlled reminder mutation access. Synthetic test coverage is not
+integration with reads and reminder mutations available to a connected authenticated owner. Synthetic test coverage is not
 an independent cryptographic audit or a production security guarantee.
 
 ## Reporting a vulnerability
@@ -53,9 +53,8 @@ application's local 24-hour session limit.
   to SMS, voice or legacy authentication. Reject missing, mismatched or replayed protocol proofs.
 - Keep the absolute session lifetime bounded. Reads must not extend it. Disconnect must clear
   stored session state; expiry must reject reads and clear expired records on access.
-- Keep reminder writes disabled unless the operator explicitly enables the write gate. The older create/edit approval must not authorize
-  completion, reopening or deletion; those require the separate v2 approval.
-  The same owner, current ready session and exact private-zone lookups must precede a write.
+- Allow reminder mutations only for the bound authenticated owner with a current ready Apple
+  session. Exact private-zone list and reminder lookups must precede a write.
   Use only bounded single-record create/update operations, deterministic create IDs and exact
   record change tags. Deletion may only set Apple’s Deleted marker through a normal tagged update.
   Never force an edit, replace a record, hard-delete one or automatically replay
@@ -78,7 +77,7 @@ application's local 24-hour session limit.
 
 Authentication bypass, owner/session isolation failures, credential disclosure, forged or replayed
 proof acceptance, stale-session access after disconnect, unsafe parsing/decompression, unauthorized
-upstream access, write-gate bypass, stale-version overwrites, unintended duplicate creates and
+upstream access, unauthorized mutation access, stale-version overwrites, unintended duplicate creates and
 other unintended reminder writes are reportable. Assess realistic reachability and
 impact for the affected deployment; no blanket exclusions or accepted-risk suppressions are defined.
 

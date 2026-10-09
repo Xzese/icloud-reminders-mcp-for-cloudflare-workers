@@ -38,7 +38,7 @@ export async function checkPublic(directory = root) {
     if (error.code !== "ENOENT") throw error;
   }
   const worker = parse(await readFile(path.join(directory, "wrangler.toml"), "utf8"));
-  if (worker.d1_databases?.[0]?.database_id !== "replace-with-your-d1-database-id" || worker.vars?.REMINDERS_OWNER_ID !== "" || worker.vars?.LIVE_APPLE_CONNECTION_APPROVED !== "" || worker.vars?.APPLE_CRYPTO_REVIEW_APPROVED !== "" || worker.vars?.LIVE_APPLE_WRITES_APPROVED !== "" || "ENCRYPTION_KEYS_JSON" in (worker.vars ?? {})) throw new Error("Public Worker configuration must retain placeholders, empty owner/approval gates and no encryption secret.");
+  if (worker.d1_databases?.[0]?.database_id !== "replace-with-your-d1-database-id" || worker.vars?.REMINDERS_OWNER_ID !== "" || worker.vars?.LIVE_APPLE_CONNECTION_APPROVED !== "" || worker.vars?.APPLE_CRYPTO_REVIEW_APPROVED !== "" || "LIVE_APPLE_WRITES_APPROVED" in (worker.vars ?? {}) || "ENCRYPTION_KEYS_JSON" in (worker.vars ?? {})) throw new Error("Public Worker configuration must retain placeholders, empty owner/approval gates and no encryption secret.");
   const forbidden = [
     /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
     /(?:ghp_|github_pat_)[A-Za-z0-9_]{30,}/,
