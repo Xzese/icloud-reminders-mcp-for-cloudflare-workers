@@ -1,6 +1,6 @@
 // Smoke journey through the built standalone edge. Synthetic JWT/JWKS only.
-import { Miniflare, Log, LogLevel, createFetchMock } from "miniflare";
-import { fetch as mockFetch } from "undici";
+import { Miniflare, Log, LogLevel } from "miniflare";
+import { fetch as mockFetch, MockAgent } from "undici";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -19,7 +19,7 @@ const owner = "synthetic-access-owner";
 const { publicKey, privateKey } = await generateKeyPair("RS256");
 const jwk = { ...await exportJWK(publicKey), alg: "RS256", use: "sig", kid: "synthetic-key" };
 const sign = sub => new SignJWT({ email: "synthetic@example.invalid" }).setProtectedHeader({ alg: "RS256", kid: jwk.kid }).setSubject(sub).setIssuer(issuer).setAudience("synthetic-audience").setIssuedAt().setExpirationTime("5m").sign(privateKey);
-const mock = createFetchMock(); mock.disableNetConnect();
+const mock = new MockAgent(); mock.disableNetConnect();
 mock.get(issuer).intercept({ path: "/cdn-cgi/access/certs", method: "GET" }).reply(200, { keys: [jwk] }).persist();
 const paths = (await readdir(server, { recursive: true, withFileTypes: true })).filter(entry => entry.isFile() && /\.(?:js|mjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 const worker = new Miniflare({
@@ -29,7 +29,7 @@ const worker = new Miniflare({
   bindings: { APP_ORIGIN: origin, REMINDERS_OWNER_ID: owner, TEAM_DOMAIN: issuer, POLICY_AUD: "synthetic-audience", ENCRYPTION_KEY_ID: "synthetic", ENCRYPTION_KEYS_JSON: JSON.stringify({ synthetic: randomBytes(32).toString("base64") }) },
   d1Databases: { DB: "synthetic-reminders-access" }, d1Persist: directory,
   assets: { directory: join(root, "dist/client"), routerConfig: { has_user_worker: true, invoke_user_worker_ahead_of_assets: true } },
-  outboundService: request => mockFetch(request, { dispatcher: mock }), log: new Log(LogLevel.ERROR),
+  outboundService: request => mockFetch(request.url, { method: request.method, headers: Object.fromEntries(request.headers), body: request.body, duplex: "half", redirect: "manual", signal: request.signal, dispatcher: mock }), log: new Log(LogLevel.ERROR),
 });
 try {
   const db = await worker.getD1Database("DB");

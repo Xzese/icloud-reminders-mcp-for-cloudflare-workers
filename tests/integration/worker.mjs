@@ -1,6 +1,6 @@
 // Acceptance journey against the exact production bundle in workerd, with synthetic data.
-import { Miniflare, Log, LogLevel, createFetchMock } from "miniflare";
-import { fetch as mockFetch } from "undici";
+import { Miniflare, Log, LogLevel } from "miniflare";
+import { fetch as mockFetch, MockAgent } from "undici";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -90,7 +90,7 @@ try {
   assert.ok(!/\<script\b(?![^>]*\bnonce=)/i.test(html));
   // Enable the transport only in this disposable Worker, with all network
   // destinations intercepted. This never opens or contacts an Apple account.
-  const fetchMock = createFetchMock(); fetchMock.disableNetConnect();
+  const fetchMock = new MockAgent(); fetchMock.disableNetConnect();
   const fixtures = JSON.parse(await readFile(join(root, "tests/fixtures/protocol.json"), "utf8")); const f = fixtures.srp[0];
   const apple = fetchMock.get("https://idmsa.apple.com");
   apple.intercept({ path: /\/appleauth\/auth\/authorize\/signin\?/, method: "GET" }).reply(200, "synthetic authorization");
@@ -179,7 +179,9 @@ try {
       assert.deepEqual(await req.clone().json(), { zones: [{ zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: "synthetic-private-owner" }, desiredRecordTypes: ["List", "Reminder"], reverse: true, desiredKeys: ["Name", "Color", "Count", "IsGroup", "Deleted", "List"], ...(catalogueRequestCount === 1 ? { syncToken: "synthetic-empty-checkpoint" } : {}) }], resultsLimit: 200 });
       catalogueRequestCount++;
     }
-    return mockFetch(req, { dispatcher: fetchMock });
+    // Miniflare and the harness can use different Undici versions. Transfer
+    // web-standard fields instead of passing a version-branded Request object.
+    return mockFetch(req.url, { method: req.method, headers: Object.fromEntries(req.headers), body: req.body, duplex: "half", redirect: "manual", signal: req.signal, dispatcher: fetchMock });
   } };
   await worker.dispose(); worker = new Miniflare(withScheduler(enabledOptions));
   const openAuth = async (generation, requestOrigin = origin) => worker.dispatchFetch(`${origin}/api/auth/socket?generation=${generation}`, { headers: { "oai-authenticated-user-id": owner, upgrade: "websocket", origin: requestOrigin, "sec-websocket-protocol": "reminders-auth-v2" } });

@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { Envelopes } from "../../src/crypto/envelopes.ts";
 import { loginAssurance } from "../../src/auth/apple/policy.ts";
 import { encodeDocument } from "../../src/reminders/crdt.ts";
+import { runControlledWriteChecks } from "../../scripts/dev/validate-local-reminder-writes.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const listId = "List/WRITE-ACCEPTANCE";
@@ -107,6 +108,14 @@ export async function verifyReminderWrites(options) {
       const url = new URL(request.url);
       state.requests.push({ method: request.method, path: url.pathname });
       const body = request.method === "POST" ? await request.clone().json() : undefined;
+      if (url.pathname.endsWith("/changes/zone")) {
+        return jsonResponse({ zones: [{ zoneID: { zoneName: "Reminders", ownerRecordName: zoneOwner }, records: [listRecord()], syncToken: "synthetic-write-test-head", moreComing: false }] });
+      }
+      if (url.pathname.endsWith("/records/query")) {
+        assert.equal(body.query.recordType, "reminderList");
+        assert.equal(body.query.filterBy.find(filter => filter.fieldName === "List").fieldValue.value.recordName, listId);
+        return jsonResponse({ records: [...state.records.values()].filter(record => record.recordType === "Reminder" && record.fields.List.value.recordName === listId && record.fields.Completed.value === 0) });
+      }
       if (url.pathname.endsWith("/records/lookup")) {
         if (state.holdLookup) {
           const held = state.holdLookup;
@@ -345,6 +354,27 @@ export async function verifyReminderWrites(options) {
     assert.equal(modifyResult.error.idempotencyKey, duringModifyKey);
     assert.equal(state.modifies.length, beforeModifyDisconnect + 1);
 
+    // Exercise the operator's one-item live-test procedure through the real MCP boundary.
+    generation = await workerHarness.seedReady();
+    const invoke = async (name, args) => {
+      const reply = await mcp("tools/call", { name, arguments: args });
+      if (reply.result.isError) throw Object.assign(new Error("Synthetic MCP tool rejected the operation."), { code: reply.result.structuredContent.error.code });
+      return reply.result.structuredContent;
+    };
+    const testKey = randomUUID();
+    const beforeControlledTest = state.modifies.length;
+    const controlled = await runControlledWriteChecks(invoke, { listId, generation, idempotencyKey: testKey });
+    assert.equal(controlled.reminderId, `Reminder/${testKey.toUpperCase()}`);
+    assert.equal(state.modifies.length, beforeControlledTest + 2, "Replay and stale-tag checks must not produce extra modifications.");
+    assert.equal(state.records.get(controlled.reminderId).fields.Priority.value, 5);
+    assert.equal(state.records.get(controlled.reminderId).fields.Flagged.value, 1);
+
+    const uncertainKey = randomUUID();
+    state.nextModify = "committed-network-drop";
+    const beforeUncertainTest = state.modifies.length;
+    await assert.rejects(runControlledWriteChecks(invoke, { listId, generation, idempotencyKey: uncertainKey }), error => error.code === "WRITE_OUTCOME_UNKNOWN");
+    assert.equal(state.modifies.length, beforeUncertainTest + 1, "An uncertain creation must stop before replay or edit.");
+
     // Expired device assurance is rejected before any Apple request, even when row state says READY.
     generation = await workerHarness.seedReady(true);
     const beforeExpired = state.requests.length;
@@ -362,6 +392,7 @@ export async function verifyReminderWrites(options) {
       "committed-5xx-and-network-drop-return-unknown-and-reconcile",
       "307-modify-response-never-follows-or-replays",
       "disconnect-fences-preflight-and-modify-confirmation",
+      "one-item-local-acceptance-procedure-and-uncertain-outcome-stop",
       "expired-session-rejected-before-Apple-access",
     ] };
   } finally {

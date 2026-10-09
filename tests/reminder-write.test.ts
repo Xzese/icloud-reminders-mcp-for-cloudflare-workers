@@ -4,6 +4,7 @@ import { AppError } from "../src/errors.ts";
 import type { CloudKitRecord } from "../src/icloud/cloudkit.ts";
 import { decodeDocument } from "../src/reminders/crdt.ts";
 import { buildCreateReminder, buildUpdateReminder, CreateReminderInput, matchesCreatedReminder } from "../src/reminders/writes.ts";
+import { parseWriteTestArgs } from "../scripts/dev/validate-local-reminder-writes.mjs";
 
 const owner = "owner-test";
 const baseInput = {
@@ -17,6 +18,15 @@ const baseInput = {
   timeZone: "Europe/London",
   allDay: true,
 };
+
+test("local live-write testing requires explicit confirmation, an exact list name, and a valid retained key", () => {
+  for (const args of [[], ["--list-name", "MCP Test"], ["--confirm"], ["--confirm", "--list-name", "MCP Test", "--idempotency-key"], ["--confirm", "--list-name", "MCP Test", "--idempotency-key", "invalid"], ["--confirm", "--list-name", "MCP Test", "--unknown"]]) {
+    assert.throws(() => parseWriteTestArgs(args), error => error instanceof Error && "code" in error && error.code === "INVALID_ARGUMENT");
+  }
+  const explicit = parseWriteTestArgs(["--confirm", "--list-name", "MCP Test", "--idempotency-key", baseInput.idempotencyKey]);
+  assert.deepEqual(explicit, { listName: "MCP Test", idempotencyKey: baseInput.idempotencyKey });
+  assert.match(parseWriteTestArgs(["--confirm", "--list-name", "MCP Test"]).idempotencyKey, /^[0-9a-f-]{36}$/);
+});
 
 function currentRecord(): CloudKitRecord {
   const create = buildCreateReminder(baseInput, 1_800_000_000_000);

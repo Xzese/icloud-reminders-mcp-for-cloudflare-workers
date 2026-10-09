@@ -95,6 +95,38 @@ already in flight. A successful mutation invalidates unfinished all-open read co
 Neither reads nor writes extend the absolute local session deadline. No new tables, mutation
 receipt cache or additional Cloudflare resources are introduced.
 
+## Local live acceptance
+
+1. Create a uniquely named, unshared iCloud list such as **MCP Test** in Apple's Reminders app.
+   The test creates one temporary item and edits only that same item. It never selects an
+   existing reminder to edit. Give the list time to appear in iCloud.
+2. From this branch, run `npm run install:ci` and `npm run build`. Stop any earlier local Worker,
+   then launch `npm run dev:icloud -- --enable-writes`.
+3. Open `http://127.0.0.1:5173/`, sign in to Apple through the connection page if required, and
+   finish device approval. Wait for the catalogue scan and **Ready** connection status.
+4. In another terminal, explicitly authorize the one-item test:
+
+   ```bash
+   npm run test:icloud-write -- --confirm --list-name 'MCP Test'
+   ```
+
+   The command prints its synthetic ID and creation key before sending a write. Retain these.
+   It checks creation, identical-key replay, a current list read, a title-only edit that preserves
+   notes/priority/flag, and rejection of an old version tag. Reads stop after at most five pages;
+   the test has a three-minute operation budget and each request times out after 40 seconds.
+   It does not automatically retry any operation. Account IDs, list IDs, existing reminder text,
+   cookies, change tags and raw Apple responses are not printed.
+5. Inspect the uniquely titled test item in Apple's app and confirm the edited title, notes,
+   medium priority and flag. Remove it there. Stop the local Worker and restart it without
+   `--enable-writes` after testing. This test does not enable writes on the hosted Site.
+
+If the command stops after creation, inspect the printed reminder ID before running another
+test. A timeout or `WRITE_OUTCOME_UNKNOWN` may mean Apple saved the item. To reconcile a creation,
+you may reuse the printed key with `--idempotency-key UUID`; the original synthetic content is
+deterministic for that key. If the item was already edited, replay of its original content returns
+`CONFLICT` and stops. Never choose a fresh key to retry an unresolved attempt. `SYNC_IN_PROGRESS`
+means the read call advanced an unfinished catalogue scan; finish scanning before another test.
+
 ## Protocol reference and acceptance
 
 The payload and text codec follow MIT-licensed pyicloud at revision

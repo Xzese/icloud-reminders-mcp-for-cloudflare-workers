@@ -1,9 +1,12 @@
 # iCloud Reminders MCP Server for Cloudflare Workers
 
 <p align="center">
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/stargazers"><img src="https://img.shields.io/github/stars/Xzese/icloud-reminders-mcp-for-cloudflare-workers?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/commits/main"><img src="https://img.shields.io/github/last-commit/Xzese/icloud-reminders-mcp-for-cloudflare-workers?style=flat-square" alt="Last commit"></a>
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers"><img src="https://img.shields.io/github/languages/top/Xzese/icloud-reminders-mcp-for-cloudflare-workers?style=flat-square" alt="Top language"></a>
   <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/actions/workflows/ci.yml"><img src="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://workers.cloudflare.com"><img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare Workers"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
 </p>
 
 A remote MCP server for your iCloud Reminders, with a private connection dashboard. Reads are
@@ -91,7 +94,8 @@ reminders are refused. Completion, deletion, moving lists and linked-record edit
 the change: read the indicated reminder before retrying, and never choose a new creation key
 for that attempt. Neither tool automatically retries writes or bypasses version conflicts.
 Synthetic acceptance does not establish live write interoperability; review the PR and use a
-dedicated test reminder for your first live test.
+dedicated test reminder for your first live test. The [local acceptance procedure](docs/write-access.md#local-live-acceptance)
+includes a command that creates and edits only its own test item.
 
 ## Resources and configuration
 
@@ -404,6 +408,17 @@ Keep actual resource identifiers and runtime settings in Cloudflare, not in publ
 No GitHub workflow in this repository deploys production or receives Apple credentials.
 
 ## Development and project structure
+
+Dependabot checks weekly and groups routine minor/patch updates into one npm PR and one GitHub
+Actions PR. Routine bot updates enable squash auto-merge automatically; the four protected-branch
+CI checks must pass before merging. Major upgrades remain manual, and failed updates stay blocked.
+Minor/patch npm security fixes are grouped separately and handled when alerts arrive.
+Merged branches are deleted automatically. The automation follows the
+[email MCP server's workflow](https://github.com/Xzese/email-mcp-for-cloudflare-workers/blob/main/.github/workflows/dependabot-auto-merge.yml).
+Builds also refresh the dependency inventory and third-party notices automatically, so a
+dependency update ships current attribution without a separate generated-file PR. The local
+and acceptance runners declare their Miniflare API version explicitly; a Wrangler update
+does not silently migrate those runners to a new major API.
 
 ```text
 src/
