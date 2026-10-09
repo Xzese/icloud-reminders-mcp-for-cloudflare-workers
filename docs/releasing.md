@@ -13,6 +13,9 @@ The configuration check rejects private identifiers, common credential patterns 
 private/generated files. Review scanner findings and Git history before publishing. These checks
 are not an exhaustive security audit or a cryptographic audit. Never force-add ignored keys,
 local environment files, session databases, private deployment copies or old private Git history.
+The Gitleaks configuration retains all default rules and excepts only five exact invented
+idempotency UUIDs in the synthetic write acceptance fixture. Do not add broad fixture, path,
+commit or UUID exemptions to hide a real credential finding.
 
 Use the title **iCloud Reminders MCP Server for Cloudflare Workers** and a repository name such as
 `icloud-reminders-mcp-for-cloudflare-workers`. The repository is MIT-licensed; preserve the
@@ -51,7 +54,9 @@ It refuses to overwrite existing output and excludes Git history, environment fi
 build output, diagnostics and generated deployment configuration. This is optional packaging,
 not a second development checkout.
 
-Document the release as experimental and read-only. Unit/synthetic workerd checks do not validate
+Document the release as an unofficial integration, with reads and supported reminder mutations
+available after authenticated Apple sign-in. Document mutation limitations and version/idempotency
+protections. Unit/synthetic workerd checks do not validate
 an operator's live Access policy, Managed OAuth/ChatGPT connection or Apple account authentication.
 Every deployment must complete those acceptance checks with its own authorized owner. Publishing
 source does not make the operator's live Site, D1 database or encrypted Apple session public.

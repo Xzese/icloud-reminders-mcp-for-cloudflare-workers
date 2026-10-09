@@ -16,6 +16,7 @@
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "test:worker": "node tests/integration/worker.mjs",
     "test:local": "node tests/integration/local-icloud.mjs",
+    "test:icloud-write": "node scripts/dev/validate-local-reminder-writes.mjs",
     "fixtures:generate": "python3 tests/fixtures/generate.py",
     "verify:artifact": "node scripts/build/verify-artifact.mjs",
     "notices:generate": "node scripts/release/generate-notices.mjs",
@@ -89,7 +90,7 @@
       "sharp": "0.35.4"
     }
   },
-  "description": "Read-only iCloud Reminders MCP server for Cloudflare Workers and ChatGPT Sites.",
+  "description": "iCloud Reminders MCP server with read and reminder mutation tools for Cloudflare Workers and ChatGPT Sites.",
   "license": "MIT",
   "repository": {
     "type": "git",

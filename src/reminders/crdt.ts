@@ -1,6 +1,6 @@
 // Narrow wire codec documented against the pinned MIT _protocol.py.
 // No generated Apple-extracted .proto schema is copied into this project.
-// Bounded reminder document codec; writes remain disabled.
+// Bounded text codec; mutation callers enforce owner, session and version checks.
 import { Gunzip, Unzlib, zlibSync } from "fflate";
 import { b64, concat, unb64, unhex, utf8 } from "../crypto/bytes.ts";
 import { bytesField, fields, getBytes, uint } from "../crypto/protobuf.ts";

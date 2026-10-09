@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "iCloud Reminders",
-  description: "Private read-only workspace for your iCloud Reminders connection.",
+  description: "Private workspace for your iCloud Reminders connection.",
   other: {
     "codex-preview": "development",
   },

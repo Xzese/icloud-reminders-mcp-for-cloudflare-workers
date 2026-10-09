@@ -8,6 +8,7 @@ import { resolve, join } from "node:path";
 import { Envelopes } from "../../src/crypto/envelopes.ts";
 import { loginAssurance } from "../../src/auth/apple/policy.ts";
 import { randomBytes } from "node:crypto";
+import { verifyReminderWrites } from "./reminder-writes.mjs";
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const config = JSON.parse(await readFile(join(root, "dist/server/wrangler.json"), "utf8"));
 const directory = await mkdtemp(join(tmpdir(), "reminders-worker-acceptance-"));
@@ -71,7 +72,7 @@ try {
   };
   const init = await mcp("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "synthetic-acceptance", version: "1" } });
   assert.equal(init.result.serverInfo.name, "hosted-icloud-reminders");
-  const tools = await mcp("tools/list", {}); assert.deepEqual(tools.result.tools.map((t) => t.name).sort(), ["connection_status", "get_all_open_reminders", "get_reminder_lists", "get_reminders"]);
+  const tools = await mcp("tools/list", {}); assert.deepEqual(tools.result.tools.map((t) => t.name).sort(), ["complete_reminder", "connection_status", "create_reminder", "delete_reminder", "get_all_open_reminders", "get_reminder", "get_reminder_lists", "get_reminders", "reopen_reminder", "update_reminder"]);
   const gatedRead = await mcp("tools/call", { name: "get_reminders", arguments: { listId: "List/NEW" } }); assert.equal(gatedRead.result.isError, true);
   const call = await mcp("tools/call", { name: "connection_status", arguments: {} }); assert.equal(call.result.structuredContent.connected, false);
   const removed = await mcp("tools/call", { name: "feasibility_status", arguments: {} }); assert.equal(removed.result.isError, true);
@@ -217,7 +218,7 @@ try {
   await sessionDB.prepare(schema).run();
   assert.deepEqual((await sessionDB.prepare("SELECT * FROM apple_session_state").all()).results, beforeSchemaRepeat);
   await worker.dispose(); worker = new Miniflare(enabledOptions);
-  const restoredApple = await (await request("/api/connection")).json(); assert.equal(restoredApple.state, "READY"); assert.equal(restoredApple.capabilities.liveRead, true); assert.equal(restoredApple.capabilities.listReminders, true); assert.equal(restoredApple.capabilities.allOpenReminders, true); assert.equal(restoredApple.liveReadValidated, undefined); assert.equal(restoredApple.validation.fullProductAcceptance, false); assert.equal(restoredApple.writeEnabled, false);
+  const restoredApple = await (await request("/api/connection")).json(); assert.equal(restoredApple.state, "READY"); assert.equal(restoredApple.capabilities.liveRead, true); assert.equal(restoredApple.capabilities.listReminders, true); assert.equal(restoredApple.capabilities.allOpenReminders, true); assert.equal(restoredApple.liveReadValidated, undefined); assert.equal(restoredApple.validation, undefined); assert.equal(restoredApple.writeEnabled, true);
   const compoundResponse = await request("/api/apple/read", { method: "POST", body: { action: "reminders", expectedGeneration: empty.generation, listId: "List/SYNTHETIC", includeCompleted: true, limit: 1 } });
   const compound = await compoundResponse.json(); assert.equal(compoundResponse.status, 200, JSON.stringify(compound)); assert.equal(compound.result.records.length, 1); assert.equal(compound.result.auxiliaryRecordCounts.Alarm, 1); assert.equal(compound.result.auxiliaryRecordCounts.List, 1); assert.equal(compound.result.auxiliaryDetailsIncluded, true); assert.equal(compound.liveReadValidated, false);
   assert.deepEqual(controlledReadLookups.at(-1).records, [{ recordName: "List/SYNTHETIC" }], "A controlled single-list reminder read authorizes the list before querying reminders.");
@@ -237,7 +238,7 @@ try {
   concurrentBatch.responses.get("List/BATCH-B")(batchReply("List/BATCH-B", { "set-cookie": "batch-b=second; Domain=icloud.com; Path=/; Secure" }));
   concurrentBatch.responses.get("List/BATCH-A")(batchReply("List/BATCH-A", { "set-cookie": "batch-a=first; Domain=icloud.com; Path=/; Secure" }));
   const batchResponse = await batchRead; const batchValue = await batchResponse.json();
-  assert.equal(batchResponse.status, 200, JSON.stringify(batchValue)); assert.equal(batchValue.writesEnabled, false);
+  assert.equal(batchResponse.status, 200, JSON.stringify(batchValue)); assert.equal(batchValue.writesEnabled, true);
   assert.deepEqual(batchValue.result.pages.map(page => page.listId), batchBody.listIds);
   for (const page of batchValue.result.pages) {
     assert.equal(page.records.length, 1); assert.equal(page.records[0].listId, page.listId);
@@ -417,7 +418,8 @@ try {
   assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/changes/zone"] ?? 0, 0);
   assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/zones/list"], 1);
   console.log(JSON.stringify({ type: "synthetic-performance", liveAppleData: false, measurements: [knownMetric, directListsMetric, directOpenInitialMetric, directOpenResumeMetric].map(({ name, elapsedMs, pathCounts }) => ({ name, elapsedMs, pathCounts })) }));
-  console.log(JSON.stringify({ result: "passed", runtime: "local-workerd", productionBundle: true, checks: ["owner-denial", "origin-CSRF", "removed-feasibility-surfaces", "stateless-MCP", "nonce-CSP", "gated-auth-no-state", "unverified-Apple-success-rejected", "dedicated-credential-document", "encrypted-session-cold-start", "legacy-envelope-restores-without-disconnect", "removed-history-actions", "saved-lists-display-only-snapshot", "direct-current-lists-pagination", "known-list-exact-authorization", "known-list-read-without-history", "direct-all-open-retry-and-frozen-resume", "all-open-continuation-replay-rejected", "restored-cookie-compound-read", "single-and-batch-list-authorization", "two-list-concurrent-read", "completion-removes-open-reminder", "failed-batch-drains-lease", "batch-auth-invalidation", "disconnect-rejects-read"], liveAppleValidated: false }));
+  const writeAcceptance = await verifyReminderWrites(options);
+  console.log(JSON.stringify({ result: "passed", runtime: "local-workerd", productionBundle: true, checks: ["owner-denial", "origin-CSRF", "removed-feasibility-surfaces", "stateless-MCP", "nonce-CSP", "gated-auth-no-state", "unverified-Apple-success-rejected", "dedicated-credential-document", "encrypted-session-cold-start", "legacy-envelope-restores-without-disconnect", "removed-history-actions", "saved-lists-display-only-snapshot", "direct-current-lists-pagination", "known-list-exact-authorization", "known-list-read-without-history", "direct-all-open-retry-and-frozen-resume", "all-open-continuation-replay-rejected", "restored-cookie-compound-read", "single-and-batch-list-authorization", "two-list-concurrent-read", "completion-removes-open-reminder", "failed-batch-drains-lease", "batch-auth-invalidation", "disconnect-rejects-read", ...writeAcceptance.checks], liveAppleValidated: false }));
 } finally {
   if (worker) await worker.dispose(); await rm(directory, { recursive: true, force: true });
 }

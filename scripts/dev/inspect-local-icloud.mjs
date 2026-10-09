@@ -3,7 +3,7 @@
 import http from "node:http";
 const origin = "http://127.0.0.1:5173";
 const [command = "status", option] = process.argv.slice(2);
-if (!["status", "discover", "read-test", "current-lists", "lookup-lists", "shared-lists", "saved-lists", "batch-read", "mcp-open-reminders", "mcp-all-open-reminders"].includes(command)) throw new Error("Use status, discover, current-lists, saved-lists, lookup-lists <List/id ...>, or read-test.");
+if (!["status", "discover", "read-test", "write-shapes", "current-lists", "lookup-lists", "shared-lists", "saved-lists", "batch-read", "mcp-open-reminders", "mcp-all-open-reminders"].includes(command)) throw new Error("Use status, discover, current-lists, saved-lists, lookup-lists <List/id ...>, or read-test.");
 if (command === "read-test" && option !== undefined && option !== "open") throw new Error("Use read-test [open].");
 const cookie = await new Promise((resolve, reject) => {
   const request = http.get(origin, { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } }, response => {
@@ -25,10 +25,35 @@ const status = await call("/api/connection");
 console.log(JSON.stringify({ operation: "status", state: status.state, generation: status.generation, transportReady: status.transportReady, action: status.action, writesEnabled: status.gates.writesEnabled }));
 if (command === "status") process.exit(0);
 if (status.state !== "READY") throw new Error("The Apple connection is not ready for a controlled read.");
-if (command === "current-lists" || command === "saved-lists") {
+if (command === "write-shapes") {
+  const { buildUpdateReminder } = await import("../../src/reminders/writes.ts");
+  // Inspect bounded read metadata only. No account/list/record identifiers,
+  // titles, documents, asset links, change tags or token values are printed.
+  const saved = await call("/api/apple/read", { action: "current-lists", expectedGeneration: status.generation });
+  const lists = saved.result.records.filter(record => !record.deleted && !record.isGroup).slice(0, 3);
+  for (const [index, list] of lists.entries()) {
+    const page = await call("/api/apple/read", { action: "reminders", expectedGeneration: status.generation, listId: list.id, includeCompleted: false, limit: 1 });
+    const record = page.result.records.find(record => record.id.startsWith("Reminder/") && !record.deleted);
+    const fields = record?.appleRecord?.fields ?? {};
+    const types = Object.fromEntries(Object.entries(fields).filter(([name]) => /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name)).map(([name, field]) => [name, typeof field?.type === "string" && /^[A-Z0-9_]{1,32}$/.test(field.type) ? field.type : "unknown"]));
+    let resolutionMapEntries = null;
+    try { const value = JSON.parse(fields.ResolutionTokenMap?.value); if (value?.map && typeof value.map === "object" && !Array.isArray(value.map)) resolutionMapEntries = Object.keys(value.map).length; } catch { /* No private values are logged. */ }
+    let titleEditCodecSupported = false, codecRejectionCode = null;
+    if (record?.appleRecord && record.recordChangeTag) {
+      try {
+        const raw = record.appleRecord;
+        // Build and discard a plain-text patch in memory. This tests the codec
+        // and token-map shape only; it never dispatches or validates ownership.
+        buildUpdateReminder({ listId: list.id, reminderId: record.id, recordChangeTag: record.recordChangeTag, changes: { title: "Controlled local codec probe" } }, { ...raw, raw }, raw.zoneID?.ownerRecordName ?? "__defaultOwner__");
+        titleEditCodecSupported = true;
+      } catch (error) { codecRejectionCode = /^[A-Z_]{1,32}$/.test(error?.code ?? "") ? error.code : "VALIDATION_ERROR"; }
+    }
+    console.log(JSON.stringify({ operation: "write-shapes-read-only", listIndex: index + 1, reminderFound: !!record, changeTagPresent: typeof record?.recordChangeTag === "string", fieldTypes: types, resolutionMapEntries, hasAlarms: !!record?.alarmIds?.length, hasRecurrence: !!record?.recurrenceRuleIds?.length, allDay: record?.allDay, dueDatePresent: typeof record?.dueDate === "string", timeZonePresent: typeof record?.timeZone === "string", titleEditCodecSupported, codecRejectionCode, writesPerformed: false }));
+  }
+} else if (command === "current-lists" || command === "saved-lists") {
   const started = Date.now();
   const response = await call("/api/apple/read", { action: command, expectedGeneration: status.generation });
-  console.log(JSON.stringify({ operation: command, elapsedMs: Date.now() - started, identifiers: response.result.records.length, availableLists: response.result.records.filter(record => !record.deleted && !record.isGroup).length, appleRequests: response.result.requestTrace?.length, pagesRead: response.result.pagesRead, complete: response.result.complete, source: response.result.source, freshness: response.result.freshness, writesEnabled: false }));
+  console.log(JSON.stringify({ operation: command, elapsedMs: Date.now() - started, identifiers: response.result.records.length, availableLists: response.result.records.filter(record => !record.deleted && !record.isGroup).length, appleRequests: response.result.requestTrace?.length, pagesRead: response.result.pagesRead, complete: response.result.complete, source: response.result.source, freshness: response.result.freshness, writesPerformed: false }));
 } else if (command === "mcp-open-reminders") {
   const invoke = async (name, args) => {
     const response = await call("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
@@ -40,7 +65,7 @@ if (command === "current-lists" || command === "saved-lists") {
   const selected = lists.records.find(list => list.title?.toLowerCase() === "reminders") ?? lists.records[0];
   if (!selected) throw new Error("No selectable reminder list is available.");
   const page = await invoke("get_reminders", { expectedGeneration: status.generation, listId: selected.id });
-  console.log(JSON.stringify({ operation: "mcp-open-reminders", elapsedMs: Date.now() - started, selectableLists: lists.records.length, reminderRecords: page.records.length, openReminders: page.records.filter(record => !record.deleted && record.completed === false).length, completedReminders: page.records.filter(record => record.completed === true).length, paginationComplete: page.paginationComplete, recordErrors: page.recordErrors.map(error => error.code), freshness: page.freshness, writesEnabled: false }));
+  console.log(JSON.stringify({ operation: "mcp-open-reminders", elapsedMs: Date.now() - started, selectableLists: lists.records.length, reminderRecords: page.records.length, openReminders: page.records.filter(record => !record.deleted && record.completed === false).length, completedReminders: page.records.filter(record => record.completed === true).length, paginationComplete: page.paginationComplete, recordErrors: page.recordErrors.map(error => error.code), freshness: page.freshness, writesPerformed: false }));
 } else if (command === "mcp-all-open-reminders") {
   const started = Date.now(); let continuation = null; let records = 0; let errors = 0; let complete = false; let progress;
   const seen = new Set();
@@ -49,20 +74,20 @@ if (command === "current-lists" || command === "saved-lists") {
     if (reply.result.isError) { console.log(JSON.stringify({ operation: command, error: reply.result.structuredContent.error })); throw new Error("All-list read failed."); }
     const page = reply.result.structuredContent;
     records += page.records.length; errors += page.recordErrors.length; progress = page.progress; complete = page.complete;
-    console.log(JSON.stringify({ operation: "all-open-progress", batch: index + 1, elapsedMs: Date.now() - started, batchRecords: page.records.length, totalOpenReminders: records, progress, complete, pendingReason: page.pendingReason, recordErrors: page.recordErrors.map(error => error.code), errors: page.errors, writesEnabled: false }));
+    console.log(JSON.stringify({ operation: "all-open-progress", batch: index + 1, elapsedMs: Date.now() - started, batchRecords: page.records.length, totalOpenReminders: records, progress, complete, pendingReason: page.pendingReason, recordErrors: page.recordErrors.map(error => error.code), errors: page.errors, writesPerformed: false }));
     continuation = page.continuation;
     if (!continuation || complete || page.pendingReason === "read_error" || page.recordErrors.length) break;
     if (seen.has(continuation)) throw new Error("All-list continuation repeated.");
     seen.add(continuation);
   }
-  console.log(JSON.stringify({ operation: command, elapsedMs: Date.now() - started, totalOpenReminders: records, complete, progress, recordErrors: errors, continuationAvailable: !!continuation, writesEnabled: false }));
+  console.log(JSON.stringify({ operation: command, elapsedMs: Date.now() - started, totalOpenReminders: records, complete, progress, recordErrors: errors, continuationAvailable: !!continuation, writesPerformed: false }));
   if (!complete) process.exitCode = 1;
 } else if (command === "batch-read") {
   const saved = await call("/api/apple/read", { action: "saved-lists", expectedGeneration: status.generation });
   const listIds = saved.result.records.filter(list => !list.deleted && !list.isGroup).slice(0, 2).map(list => list.id);
   const started = Date.now();
   const response = await call("/api/apple/read", { action: "reminders-batch", expectedGeneration: status.generation, listIds, includeCompleted: false, limit: 200 });
-  console.log(JSON.stringify({ operation: "batch-read", elapsedMs: Date.now() - started, lists: response.result.pages.map(page => ({ records: page.records.length, openReminders: page.records.filter(record => !record.deleted && record.completed === false).length, recordErrors: page.recordErrors.length, paginationComplete: page.paginationComplete })), appleRequests: response.result.requestTrace.length, writesEnabled: false }));
+  console.log(JSON.stringify({ operation: "batch-read", elapsedMs: Date.now() - started, lists: response.result.pages.map(page => ({ records: page.records.length, openReminders: page.records.filter(record => !record.deleted && record.completed === false).length, recordErrors: page.recordErrors.length, paginationComplete: page.paginationComplete })), appleRequests: response.result.requestTrace.length, writesPerformed: false }));
 } else if (command === "shared-lists") {
   const response = await call("/api/apple/read", { action: "probe-shared-lists", expectedGeneration: status.generation, listIds: process.argv.slice(3) });
   console.log(JSON.stringify(response));
@@ -75,7 +100,7 @@ if (command === "current-lists" || command === "saved-lists") {
     const list = response.result.records.find(record => record.id === listId);
     if (list?.deleted || list?.isGroup) continue;
     const reminderResponse = await call("/api/apple/read", { action: "reminders", expectedGeneration: status.generation, listId, includeCompleted: false, limit: 200 });
-    console.log(JSON.stringify({ operation: "direct-open-reminders-read", inputIndex: listIds.indexOf(listId) + 1, reminderRecords: reminderResponse.result.records.length, openReminders: reminderResponse.result.records.filter(record => record.completed === false && !record.deleted).length, completedReminders: reminderResponse.result.records.filter(record => record.completed === true).length, paginationComplete: reminderResponse.result.paginationComplete, recordErrors: reminderResponse.result.recordErrors.map(error => error.code), relatedRecordCounts: reminderResponse.result.auxiliaryRecordCounts, requestTrace: reminderResponse.result.requestTrace, writesEnabled: false }));
+    console.log(JSON.stringify({ operation: "direct-open-reminders-read", inputIndex: listIds.indexOf(listId) + 1, reminderRecords: reminderResponse.result.records.length, openReminders: reminderResponse.result.records.filter(record => record.completed === false && !record.deleted).length, completedReminders: reminderResponse.result.records.filter(record => record.completed === true).length, paginationComplete: reminderResponse.result.paginationComplete, recordErrors: reminderResponse.result.recordErrors.map(error => error.code), relatedRecordCounts: reminderResponse.result.auxiliaryRecordCounts, requestTrace: reminderResponse.result.requestTrace, writesPerformed: false }));
   }
 } else if (command === "read-test") {
   const response = await call("/api/apple/read", { action: "current-lists", expectedGeneration: status.generation });

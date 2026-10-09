@@ -1,12 +1,16 @@
 # iCloud Reminders MCP Server for Cloudflare Workers
 
 <p align="center">
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/stargazers"><img src="https://img.shields.io/github/stars/Xzese/icloud-reminders-mcp-for-cloudflare-workers?style=flat-square" alt="Stars"></a>
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/commits/main"><img src="https://img.shields.io/github/last-commit/Xzese/icloud-reminders-mcp-for-cloudflare-workers?style=flat-square" alt="Last commit"></a>
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers"><img src="https://img.shields.io/github/languages/top/Xzese/icloud-reminders-mcp-for-cloudflare-workers?style=flat-square" alt="Top language"></a>
   <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/actions/workflows/ci.yml"><img src="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://workers.cloudflare.com"><img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare Workers"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
+  <a href="https://github.com/Xzese/icloud-reminders-mcp-for-cloudflare-workers/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
 </p>
 
-A read-only remote MCP server for your iCloud Reminders, with a private connection dashboard.
+A remote MCP server for your iCloud Reminders, with a private connection dashboard. Reads are
+enabled after connecting, along with creation, editing, completion, reopening and deletion.
 Deploy it through **ChatGPT Sites** or to your own **Cloudflare Worker** protected by Cloudflare
 Access and Managed OAuth. No containers, Python runtime, KV namespace or Durable Objects are required.
 
@@ -17,12 +21,14 @@ are fetched from Apple when requested and are not cached in D1.
 **Experimental, unofficial integration.** This project uses Apple's undocumented web protocols,
 not Sign in with Apple or an official Reminders API. The login page is served by your deployment;
 you must trust its browser code with your password input. Cryptographic reference tests are not an
-independent security audit. Creating, updating, completing and deleting reminders are disabled.
+independent security audit. Reminder reads and mutations use unofficial Apple protocols;
+review the supported fields and limitations before using them.
 
 ## Table of contents
 
 - [Public source, private deployments](#public-source-private-deployments)
 - [Tools](#tools)
+- [Reminder write access](#reminder-write-access)
 - [Resources and configuration](#resources-and-configuration)
 - [Local setup](#local-setup)
 - [ChatGPT Sites setup](#chatgpt-sites-setup)
@@ -55,16 +61,58 @@ Review Git history before publishing a repository that previously contained priv
 
 | Tool | Behaviour |
 | --- | --- |
-| `connection_status` | Report connection state, session generation and read availability; does not contact Apple. |
+| `connection_status` | Report connection state, session generation and tool availability; does not contact Apple. |
 | `get_reminder_lists` | Query current selectable private-zone lists directly, without historical scanning. |
 | `get_reminders` | Authorize an exact `listId` live, then fetch one current page without catalogue synchronization; open reminders by default. |
 | `get_all_open_reminders` | Discover selectable lists once per operation, then fetch open reminders with resumable per-list pages. |
+| `get_reminder` | Read one exact ID, including completed or soft-deleted state, for current version tags and recovery. |
+| `create_reminder` | Create one open reminder using a stable UUID `idempotencyKey`. |
+| `update_reminder` | Edit specified fields of one open reminder using its current `recordChangeTag`. |
+| `complete_reminder` | Complete one open reminder using its current version. |
+| `reopen_reminder` | Reopen one completed reminder and clear its completion date. |
+| `delete_reminder` | Soft-delete one open or completed reminder using its current version. |
 
-Tools return `structuredContent` plus a text copy for client compatibility. Use the IDs returned
-by `get_reminder_lists`. `get_reminders` accepts `includeCompleted`, `limit` (1–200) and its returned
+Tools return `structuredContent` plus a text copy for client compatibility. Every tool advertises
+a typed output schema for successful results and describes its parameters in the input schema.
+Application failures return `isError: true` with a
+sanitized error object and matching JSON text, including recovery IDs when a write is uncertain.
+Read tools are marked read-only; Apple-facing tools use `openWorldHint: true`. Creation is additive,
+while editing, completion, reopening and deletion are marked destructive. All mutation tools
+use `idempotentHint: true`: identical creation inputs reuse the same UUID, and existing-item writes
+cannot apply twice with the same version tag. A repeated request can return `CONFLICT`; idempotency
+does not promise repeated success or authorize a new request with a fresh tag.
+
+Use the IDs returned by `get_reminder_lists`. `get_reminders` accepts `includeCompleted`, `limit`
+(1–200) and its returned
 `continuation`. An all-open result with `complete: false` may include a separate opaque continuation;
 call `get_all_open_reminders` again with that value and combine the returned records. Inspect errors
 before retrying and respect any `retryAfterSeconds`. A partial result is not the entire collection.
+
+## Reminder write access
+
+Creation, editing, completion, reopening and soft deletion are available to the authenticated
+owner once the Apple session is ready, in both deployment modes and the local launcher. There
+is no separate write approval flag. Review [the write protocol and limitations](docs/write-access.md).
+`connection_status` reports `writeEnabled` and the create/update/complete/reopen/delete
+capabilities based on the current connection state.
+
+Use `get_reminder_lists` to select a list and `get_reminders` to obtain reminder IDs and current
+version tags. Creates need a new UUID `idempotencyKey` for each distinct reminder; reuse that
+same key and content after an uncertain result. Updates need the last-read `recordChangeTag`
+and a nonempty `changes` object. `get_reminder` reads the exact current item, including completed
+or soft-deleted state, without scanning history. Only specified fields change. Supported fields are title, notes,
+priority, flag, due date, time zone and all-day status. Date edits on recurring or alarmed
+reminders are refused. Completion, reopening and deletion refuse recurring, alarmed and nested
+reminders, and send one tagged record update. They do not detect parents or implement subtask
+cascades; use Apple's app for parent/subtask workflows. Deletion sets Apple's `Deleted` marker
+with a normal update; no hard-delete or restore tool is exposed. Moving lists and linked-record
+editing are excluded.
+
+`CONFLICT` requires a fresh read and review. `WRITE_OUTCOME_UNKNOWN` means Apple may have saved
+the change: read the indicated reminder before retrying, and never choose a new creation key
+for that attempt. No mutation tool automatically retries writes or bypasses version conflicts.
+Use a dedicated test reminder for your first live test. The [local acceptance procedure](docs/write-access.md#local-live-acceptance)
+includes a command that creates, edits, completes, reopens and deletes only its own test item.
 
 ## Resources and configuration
 
@@ -91,9 +139,10 @@ cryptography and your Access configuration; validate those limits in your deploy
 | `TEAM_DOMAIN` | Standalone only: `https://<team>.cloudflareaccess.com`. |
 | `POLICY_AUD` | Standalone only: Access application's audience tag. |
 
-The two Apple approval settings default to empty. They are operator acknowledgements, not a review
+The two Apple login approval settings default to empty. They are operator acknowledgements, not a review
 or audit performed by the software. Do not enable them before reviewing the trust boundary and
-accepting a controlled account test. Reminder mutations stay disabled even when login is enabled.
+accepting the account connection. A ready authenticated Apple connection enables reads and the
+supported reminder mutations.
 
 ## Local setup
 
@@ -128,6 +177,12 @@ identity headers. It must remain running for local access and its automatic chec
 the stored session. Its ignored `.sites-runtime/local-icloud/` is private account state, not a fixture.
 
 Local tests and CI use synthetic data and do not require an Apple account.
+
+The normal local launcher supports reminder changes after sign-in. Use a dedicated test reminder
+for the acceptance procedure in [the write documentation](docs/write-access.md#local-live-acceptance).
+The diagnostic command
+`node scripts/dev/inspect-local-icloud.mjs write-shapes` performs bounded reads and reports only
+field types/version presence; it does not submit a write or print reminder contents.
 
 ## ChatGPT Sites setup
 
@@ -279,8 +334,10 @@ Never send your Apple password, device code, encryption keys or cookies to the c
 4. Approve the trusted-device prompt and enter the six-digit code **on the credential page** when
    its code field appears. SMS, voice and legacy device-code fallbacks are not supported.
 5. Return to the dashboard. If Apple separately requires web access to your Reminders keys,
-   approve that request on your device and use **Check Apple approval**. Device verification
-   and Reminders-data approval are separate steps.
+   approve that request on your device. The dashboard checks approval automatically while visible,
+   respecting Apple’s retry time. **Check Apple approval** remains available if automatic checks
+   pause after repeated errors or their safety limit. Device verification and Reminders-data
+   approval are separate steps.
 6. Confirm the session is ready, then use a reminder MCP tool. Known-list reads verify access and
    fetch reminders directly. List discovery uses the direct query described below.
 
@@ -398,13 +455,13 @@ src/
   lib/               Shared utilities and connector helpers
   types/             Application and Worker type declarations
   api/               Authenticated API routing
-  mcp/               Read-only MCP tools
+  mcp/               MCP read and reminder mutation tools
   auth/              Apple authentication and direct reminder reads
   crypto/            Protocol cryptography and encrypted storage envelopes
   icloud/            CloudKit transport and record normalization
   persistence/       Native D1 session storage
   platform/          Sites and Cloudflare authentication adapters
-  reminders/         Reminder document codec
+  reminders/         Reminder document codec and bounded write schemas/payloads
   transport/         Bounded Apple HTTP and WebSocket transports
 scripts/
   build/             Vite plugins, framework build runner and artifact checks
