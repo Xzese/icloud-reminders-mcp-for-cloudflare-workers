@@ -139,7 +139,7 @@ production-bundle Worker acceptance, local transport integration, artifact verif
 configuration checks, standalone build/dry-run and standalone Access acceptance. All fixtures use
 synthetic data. A separate isolated browser preview verified the direct refresh button, saved
 retrieval timestamp, list selection and reminder preview; display polling did not repeat the
-synthetic Lists query. The preview used synthetic encrypted sessions and mocked Apple responses. Lint passes with 12 warnings and no errors. No security check is bypassed.
+synthetic Lists query. The preview used synthetic encrypted sessions and mocked Apple responses. Lint passes with 3 pre-existing warnings outside the changed files and no errors. No security check is bypassed.
 
 Remaining live acceptance requires an explicitly authorized bounded, read-only Apple account test. Compare paginated results against the account's Apple UI using
 uniquely identifiable old lists, empty lists, groups, new lists, renamed lists and deleted lists.

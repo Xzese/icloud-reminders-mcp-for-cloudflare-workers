@@ -353,6 +353,11 @@ try {
   const knownMetric = await measuredMcp("known-list read with stale checkpoint", () => mcp("tools/call", { name: "get_reminders", arguments: { expectedGeneration: directGeneration, listId: "List/KNOWN" } }));
   assert.ok(!knownMetric.value.result.isError, JSON.stringify(knownMetric.value));
   assert.equal(knownMetric.value.result.structuredContent.source, "direct-known-list-query");
+  assert.deepEqual(knownMetric.value.result.structuredContent.records.map(record => record.id), ["Reminder/KNOWN"]);
+  for (const record of knownMetric.value.result.structuredContent.records) {
+    assert.equal(Object.hasOwn(record, "appleRecord"), false, "MCP responses omit raw Apple records.");
+    assert.equal(Object.hasOwn(record, "raw"), false);
+  }
   assert.deepEqual(knownMetric.pathCounts, { "/database/1/com.apple.reminders/production/private/zones/list": 1, "/database/1/com.apple.reminders/production/private/records/lookup": 1, "/database/1/com.apple.reminders/production/private/records/query": 1 });
   const completedKnownRead = await mcp("tools/call", { name: "get_reminders", arguments: { expectedGeneration: directGeneration, listId: "List/KNOWN" } });
   assert.ok(!completedKnownRead.result.isError, JSON.stringify(completedKnownRead));
@@ -401,6 +406,10 @@ try {
   assert.equal(directOpenResume.freshness.mode, "live"); assert.equal(directOpenResume.progress.listsTotal, 2); assert.equal(directOpenResume.progress.listsCompleted, 2);
   assert.deepEqual(directOpenResume.lists.map(list => list.id), ["List/EMPTY", "List/ACTIVE"]);
   assert.deepEqual(directOpenResume.records.map(record => record.id), ["Reminder/ACTIVE-1", "Reminder/ACTIVE-2"]);
+  for (const record of directOpenResume.records) {
+    assert.equal(Object.hasOwn(record, "appleRecord"), false);
+    assert.equal(Object.hasOwn(record, "raw"), false, "All-open responses omit raw Apple records.");
+  }
   assert.equal(directOpenResume.progress.pagesRead, 3);
   assert.ok(!directOpenResume.records.some(record => record.id === "Reminder/CLOSED" || record.id === "Reminder/DELETED"));
   assert.equal(directMcpScenario.listQueries, listQueriesAfterInitial, "A continuation resumes the saved list selection without rediscovering Lists.");

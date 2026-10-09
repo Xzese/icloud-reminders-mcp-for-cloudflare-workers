@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AppError, WriteOutcomeUnknownError } from "../errors.ts";
+import { omitField } from "../lib/omit-field.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
 import { AppleSessionRepository, mergeSavedLists, type AppleSession, type AllOpenScan, type ResumeFence } from "../persistence/apple-sessions.ts";
 import { CloudKitRateLimitedError, CloudKitRemindersClient, normalizeList, normalizeReminder, type CloudKitPage, type CloudKitRecord, type CloudKitLookupResult } from "../icloud/cloudkit.ts";
@@ -103,7 +104,7 @@ export class AppleConnectionService {
     const gates = appleGates(this.env);
     const session = await new AppleSessionRepository(this.env, this.owner).status();
     const readsAvailable = gates.enabled && session.transportReady;
-    const { liveReadValidated: _legacyValidation, ...connection } = session;
+    const connection = omitField(session, "liveReadValidated");
     const writesAvailable = readsAvailable;
     return { ...connection, listDiscovery: { strategy: "direct", liveValidated: false, experimental: true }, gates, connected: readsAvailable, writeEnabled: writesAvailable, phase: writesAvailable ? "read-write" : "read-only", capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: writesAvailable, update: writesAvailable, complete: writesAvailable, reopen: writesAvailable, delete: writesAvailable }, mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_reminder", "get_all_open_reminders", "create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "delete_reminder"], message: !gates.enabled ? appleDisabledMessage(gates) : session.state === "READY" ? "You can read, create, edit, complete, reopen and delete reminders. Use current IDs and version tags." : session.state === "DEVICE_APPROVAL_PENDING" ? (session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again.") : "Connect your Apple account through the private Site's secure connection form." };
   }
@@ -121,7 +122,7 @@ export class AppleConnectionService {
       const current = item?.deleted === true ? null : writeLookupRecord(found, reminderId, true);
       let record = null;
       if (current) {
-        const { raw: _raw, ...normalized } = normalizeReminder(current, client.remindersZoneOwner);
+        const normalized = omitField(normalizeReminder(current, client.remindersZoneOwner), "raw");
         if (normalized.listId !== listId) throw new AppError("FORBIDDEN", "The reminder does not belong to the requested list.", 403);
         record = normalized;
       }
@@ -157,7 +158,7 @@ export class AppleConnectionService {
         let confirmed: CloudKitRecord;
         let replayed = false;
         if (input.action === "create") {
-          const { action: _action, expectedGeneration: _generation, ...create } = input;
+          const create = omitField(omitField(input, "action"), "expectedGeneration");
           write = buildCreateReminder(create);
           if (current) {
             if (!matchesCreatedReminder(create, current, owner) || !current.recordChangeTag) throw new AppError("CONFLICT", "The create ID already exists with different content or state. Read that reminder; do not reuse this key for another item.", 409);
@@ -169,7 +170,7 @@ export class AppleConnectionService {
             if (!matchesCreatedReminder(create, confirmed, owner)) throw new WriteOutcomeUnknownError(targetId, input.idempotencyKey);
           }
         } else {
-          const { action: _action, expectedGeneration: _generation, ...update } = input;
+          const update = omitField(omitField(input, "action"), "expectedGeneration");
           if (input.action === "update") {
             write = buildUpdateReminder({ ...update, changes: input.changes }, current!, owner);
           } else {
@@ -180,8 +181,8 @@ export class AppleConnectionService {
           applied = true;
           verifyWriteFields(write, confirmed, current!, owner, input.listId);
         }
-        const { raw: _raw, ...record } = normalizeReminder(confirmed, owner);
-        const { allOpenScan: _staleScan, ...session } = saved.session;
+        const record = omitField(normalizeReminder(confirmed, owner), "raw");
+        const session = omitField(saved.session, "allOpenScan");
         // A confirmation and cookie save share the existing owner/generation
         // fence. A lost fence after dispatch reports uncertainty, not success.
         await repository.commitResume(fence, { ...session, connection, auth: http.snapshot() }, "READY");
@@ -218,7 +219,7 @@ export class AppleConnectionService {
     const found = await client.queryAllLists();
     if (!found.complete) throw new AppError("UNSUPPORTED_FEATURE", "Direct list discovery did not finish within its safe limits or returned record errors. The previous snapshot is preserved. Retry a refresh; if the error persists, direct discovery is not supported for this account or exceeds the current limits.", 409);
     const now = Date.now();
-    const records = found.lists.map(({ raw: _raw, ...list }) => list);
+    const records = found.lists.map(list => omitField(list, "raw"));
     const savedLists = mergeSavedLists([], records, now);
     return { records, pagesRead: found.pagesRead, session: { ...session,
       connection: { ...session.connection, remindersZoneOwner: client.remindersZoneOwner },
@@ -286,7 +287,7 @@ export class AppleConnectionService {
         queried = true;
         records = page.records.flatMap(record => {
           if (!("recordType" in record) || record.recordType !== "Reminder" || record.deleted) return [];
-          const { raw: _raw, ...reminder } = normalizeReminder(record, client.remindersZoneOwner);
+          const reminder = omitField(normalizeReminder(record, client.remindersZoneOwner), "raw");
           return reminder.deleted || reminder.completed === true ? [] : [reminder];
         });
         if (records.length > 200) throw new AppError("PROTOCOL_CHANGED", "Apple returned more reminders than the all-open page budget.");
@@ -410,7 +411,7 @@ export class AppleConnectionService {
         const records = [...found.records.map(record => {
           if (record.deleted) return { id: record.recordName, deleted: true };
           if (!("recordType" in record) || record.recordType !== "List") throw new AppError("PROTOCOL_CHANGED", "Apple returned an unexpected record in the list lookup.");
-          const { raw, ...summary } = normalizeList(record, false); return summary;
+          return omitField(normalizeList(record, false), "raw");
         }), ...found.recordErrors.flatMap(error => error.recordName && ["UNKNOWN_ITEM", "NOT_FOUND"].includes(error.serverErrorCode) ? [{ id: error.recordName, deleted: true }] : [])];
         savedLists = mergeSavedLists(savedLists, records);
         result = { records, recordErrors: found.recordErrors.map(error => ({ id: error.recordName, code: error.serverErrorCode })), complete: found.complete, paginationComplete: true, continuation: null, pendingReason: found.complete ? null : "record_errors", scope: "controlled-lookup", auxiliaryRecordCounts: {}, auxiliaryDetailsIncluded: false, unrefreshedLists: input.action === "refresh-saved-lists" ? Math.max(0, saved.session.savedLists!.length - listIds.length) : 0 };
