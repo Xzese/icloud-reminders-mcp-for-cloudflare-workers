@@ -28,17 +28,9 @@ export function summarizeAppleResponse(url, status, body) {
     result.records = records.length;
     result.recordTypes = {};
     result.relationshipFieldTypes = {};
-    result.catalogueReminderShapes = {};
     for (const record of records) {
       const type = typeof record?.recordType === "string" && ["List", "Reminder", "Alarm", "AlarmTrigger", "Attachment", "Hashtag", "RecurrenceRule"].includes(record.recordType) ? record.recordType : "other";
       result.recordTypes[type] = (result.recordTypes[type] ?? 0) + 1;
-      if (type === "Reminder" && url.pathname.endsWith("/changes/zone")) {
-        const deleted = record.deleted === true ? "tombstone" : record.fields?.Deleted?.value === 1 ? "logical-deleted" : record.fields?.Deleted?.value === 0 ? "active" : "unknown-deletion";
-        const list = record.fields?.List;
-        const relationship = !list ? "no-list-field" : list.value == null ? "null-list" : list.type === "REFERENCE" ? "reference" : "other-list-type";
-        const bucket = `${deleted}:${relationship}`;
-        result.catalogueReminderShapes[bucket] = (result.catalogueReminderShapes[bucket] ?? 0) + 1;
-      }
       if (type === "Reminder") for (const key of ["AlarmIDs", "AttachmentIDs", "HashtagIDs", "RecurrenceRuleIDs"]) {
         const field = record.fields?.[key];
         if (!field || typeof field !== "object") continue;
@@ -48,8 +40,7 @@ export function summarizeAppleResponse(url, status, body) {
         result.relationshipFieldTypes[bucket] = (result.relationshipFieldTypes[bucket] ?? 0) + 1;
       }
     }
-    result.moreComing = zones.map(z => z?.moreComing === true ? true : z?.moreComing === false ? false : null);
-    result.checkpointsPresent = zones.map(z => typeof z?.syncToken === "string");
+    result.queryContinuationPresent = typeof body.continuationMarker === "string";
     result.errors = records.filter(r => typeof r?.serverErrorCode === "string").length;
     result.responseError = typeof body.serverErrorCode === "string";
     if (result.responseError) {

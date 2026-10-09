@@ -2,8 +2,9 @@
 
 ## Decision
 
-Direct discovery is **experimental and disabled by default**. Select it explicitly with
-`REMINDERS_LIST_DISCOVERY=direct`; omit the setting or use `legacy` for the existing scanner.
+Direct discovery is the **only list-discovery path**. At the owner's explicit request following
+local validation, historical discovery, its fallback strategy, scheduling and checkpoints were
+removed. No discovery setting is required. Authentication/data-approval gates remain unchanged.
 An explicitly approved local read-only test verified the expected list set, creation and deletion
 on one live account on 2026-10-09. No production deployment or session reset was performed.
 Broader completeness remains unverified, including live pagination, groups and shared lists.
@@ -28,7 +29,7 @@ Synthetic tests confirm plural requests, singular responses, opaque continuation
 normalization, owner/zone rejection, empty lists, groups, tombstones and logical deletion.
 `queryAllLists` deduplicates identical summaries, rejects conflicting identifiers and returns
 explicitly incomplete results on record failures, continuation cycles and processing limits.
-Neither method invokes the legacy change scanner.
+The transport no longer supports `/changes/zone`.
 
 No field projection is used: live support for special-query `desiredKeys` is unknown. Requests do
 not explicitly request reminder content or list membership; Apple may include extra list fields,
@@ -42,7 +43,8 @@ list IDs and a 1 MiB summary budget reserving 4 KiB for response metadata. The t
 bounds each request/response and applies its own timeout. An incomplete refresh returns an
 actionable `UNSUPPORTED_FEATURE` error from the service; it never publishes an empty or partial
 catalogue and never silently starts historical scanning. There is no public resumable list cursor;
-accounts exceeding these limits must retry or explicitly use legacy recovery.
+transient failures can be retried, but accounts persistently exceeding these limits cannot currently
+complete discovery. Unsupported queries fail explicitly; no historical fallback remains.
 
 Only a complete retrieval replaces the authoritative encrypted snapshot, so successful refreshes
 reflect additions, renames and removals. The dashboard displays saved summaries and retrieval time;
@@ -50,22 +52,25 @@ reflect additions, renames and removals. The dashboard displays saved summaries 
 cache. Raw Apple fields and traces are excluded from MCP output. List names/IDs remain encrypted.
 
 Known-list reads always make a current exact lookup, with format, type, deletion/group, owner and
-zone checks, before querying `reminderList`. They work without a saved catalogue, while discovery
-is pending, and after a historical checkpoint expires. Cached IDs never prove authorization.
+zone checks, before querying `reminderList`. They work without a saved snapshot and independently
+of list discovery. Old historical checkpoints are ignored on upgrade. Cached IDs never prove authorization.
 Open-only filtering remains the default; completed items are optional. Compound records and query
 continuations retain existing handling. Reminder contents remain live and are not persisted.
 
 All-open direct reads discover a complete list set once, filter groups/deleted lists and save that
 operation's selection. Resumption preserves selection and per-list position even after an unrelated
 list refresh. Existing single-use encrypted continuation rotation, expiry, partial-failure retry,
-response/page/time limits and owner/session fences remain. A separate legacy recovery collection
-prevents historical work from overwriting newer direct snapshots. Added envelope fields are optional;
-existing version-1 sessions and old continuations remain readable without a D1 migration or reset.
+response/page/time limits and owner/session fences remain. Version-1 encrypted sessions stay
+compatible: recognized obsolete diagnostic, checkpoint, scheduler and recovery fields are stripped
+on load and omitted from the next successful commit. Old historical/unmarked all-open selections
+are retired without disconnecting the account; direct-query continuations preserve their selected
+lists. No D1 migration or session reset is required. Unknown active fields still fail strict validation.
 
-Direct mode suppresses the background historical scanner. Explicit legacy diagnostics remain
-available, and configured local/cron legacy runners retain checkpoints/backoff. Sites does not
-provision a recurring trigger. Authentication, Access/Sites identity, origin checks, AES-256-GCM,
-generation/version fencing, read leases, absolute expiry and disconnect invalidation are unchanged.
+There is no scheduled Worker handler, local background scan timer, strategy switch or historical
+transport. Generated Cloudflare configs omit triggers; operators remove previously provisioned
+catalogue schedules during their own deployment. Authentication, Access/Sites identity, origin
+checks, AES-256-GCM, generation/version fencing, read leases, absolute expiry and disconnect
+invalidation are unchanged.
 
 ## Approved local live validation
 
@@ -80,6 +85,7 @@ from this evidence.
 | Initial retrieval | 3 | 9 | 1 | 1 | 0 | 1,064.93 ms |
 | After creation | 4 | 9 | 1 | 0 | 0 | 1,473.43 ms |
 | After deletion | 3 | 10 | 1 | 0 | 0 | 825.86 ms |
+| After removing historical code and restarting the same connection | 3 | 10 | 1 | 0 | 0 | 847.66 ms |
 
 Every retrieval returned HTTP 200, singular `List` records, no record errors and no continuation.
 The initial and final active sets matched the owner's inventory, allowing capitalization differences;
@@ -90,7 +96,7 @@ latency, not repeated benchmarks or a measured live comparison with the old impl
 This verifies existing-list discovery and creation/deletion freshness for this account. It does not
 verify live multi-page continuation, renamed lists, group handling, shared-database coverage or
 other accounts. List emptiness and age were not independently inspected. Known-list and all-open
-live reads were not part of this test. Keep direct discovery opt-in pending those remaining checks;
+live reads were not part of this test. Direct discovery became the sole path at the owner’s request;
 the capability flag still represents broader completeness, not this limited validation.
 
 ## Measured synthetic comparison
@@ -119,24 +125,23 @@ requests in every case.
 The Worker harness separately reports real workerd MCP measurements for a stale-checkpoint known
 read, two-page direct discovery and all-open error/resumption. It asserts zero `/changes/zone`
 calls on direct/known paths and no `Lists` rediscovery on resumption. Its durations include local
-Worker/storage overhead and mocked network responses; raw timing values are emitted on each run. The final production-bundle run measured:
+Worker/storage overhead and mocked network responses; raw timing values are emitted on each run. The final direct-only production-bundle run measured:
 
-- Stale-checkpoint known-list read: 17.311 ms; 1 zone discovery + 1 lookup + 1 reminder query.
-- Direct selectable lists: 5.390 ms; 2 paginated `Lists` queries.
-- Direct all-open initial call: 11.879 ms; 2 list queries + 1 failed reminder query (explicit incomplete result).
-- All-open resume: 10.442 ms; 2 reminder queries, no list discovery or change calls.
+- Stale-checkpoint known-list read: 14.327 ms; 1 zone discovery + 1 lookup + 1 reminder query.
+- Direct selectable lists: 7.854 ms; 2 paginated `Lists` queries.
+- Direct all-open initial call: 13.379 ms; 2 list queries + 1 failed reminder query (explicit incomplete result).
+- All-open resume: 16.632 ms; 3 reminder queries, no list discovery or change calls.
 
 ## Validation and remaining operator action
 
-Automated validation includes typecheck, unit/protocol/persistence tests, lint, Sites build,
+Automated validation passes typecheck, 54 unit/protocol/persistence tests, lint, Sites build,
 production-bundle Worker acceptance, local transport integration, artifact verification, public
 configuration checks, standalone build/dry-run and standalone Access acceptance. All fixtures use
 synthetic data. A separate isolated browser preview verified the direct refresh button, saved
 retrieval timestamp, list selection and reminder preview; display polling did not repeat the
-synthetic Lists query. The preview used synthetic encrypted sessions and mocked Apple responses. Lint passes with 13 warnings and no errors. No security check is bypassed.
+synthetic Lists query. The preview used synthetic encrypted sessions and mocked Apple responses. Lint passes with 12 warnings and no errors. No security check is bypassed.
 
-Before making direct discovery the default, an operator must explicitly authorize a bounded,
-read-only Apple account test. Compare paginated results against the account's Apple UI using
+Remaining live acceptance requires an explicitly authorized bounded, read-only Apple account test. Compare paginated results against the account's Apple UI using
 uniquely identifiable old lists, empty lists, groups, new lists, renamed lists and deleted lists.
 Determine separately whether shared lists in the private zone are complete and whether shared
 zones require discovery. Verify that the first request needs no prior `changes/zone` calls and
@@ -144,7 +149,8 @@ that continuations return the full ID set. Record only sanitized counts, flags a
 evidence; never credentials, names, reminder contents or opaque tokens. Keep captures/session state
 in ignored private paths. Do not reset sessions or deploy as part of validation.
 
-If Apple rejects the query, report the classified error and preserve the previous snapshot. An
-operator may explicitly select `legacy` and use diagnostic restart for an expired checkpoint.
-Known-list reads remain independent of discovery in both modes. Do not enable direct mode by
-default based only on this synthetic evidence.
+If Apple rejects the query, report the classified error and preserve the previous snapshot.
+Known-list reads remain independent of discovery. Remove obsolete discovery/background flags and
+previously provisioned catalogue Cron triggers during operator-managed deployment. The implementation
+has no historical fallback. Passing this account's creation/deletion test does not establish
+completeness for all accounts or shared lists.
