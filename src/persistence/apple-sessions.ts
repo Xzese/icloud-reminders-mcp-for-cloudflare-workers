@@ -137,7 +137,10 @@ const AllOpenScanSchema = z.object({
   listPages: z.number().int().min(0).max(1000),
   totalPages: z.number().int().min(0).max(10000),
   caughtUpAt: z.number().int().nonnegative().safe(),
-}).strict().refine(scan => scan.index <= scan.listIds.length, "The all-open scan list index is invalid.");
+  source: z.enum(["direct-cloudkit-query", "legacy-catalogue"]).optional(),
+  lists: SavedListsSchema.optional(),
+}).strict().refine(scan => scan.index <= scan.listIds.length, "The all-open scan list index is invalid.")
+  .refine(scan => !scan.lists || scan.lists.length === scan.listIds.length && scan.lists.every((list, index) => list.id === scan.listIds[index] && !list.deleted && !list.isGroup), "The all-open list selection is inconsistent.");
 export type AllOpenScan = z.infer<typeof AllOpenScanSchema>;
 export const AppleSessionSchema = z.object({
   auth: AuthSnapshotSchema,
@@ -149,6 +152,9 @@ export const AppleSessionSchema = z.object({
   catalogueAuto: CatalogueAutoSchema.optional(),
   allOpenScan: AllOpenScanSchema.optional(),
   savedLists: SavedListsSchema.optional(),
+  // Optional additions preserve version-1 envelopes and old checkpoints.
+  directListSnapshot: z.object({ updatedAt: z.number().int().nonnegative().safe() }).strict().optional(),
+  legacySavedLists: SavedListsSchema.optional(),
 }).strict();
 export type AppleSession = {
   auth: AuthSnapshot;
@@ -160,6 +166,8 @@ export type AppleSession = {
   catalogueAuto?: CatalogueAutoCheckpoint;
   allOpenScan?: AllOpenScan;
   savedLists?: SavedList[];
+  directListSnapshot?: { updatedAt: number };
+  legacySavedLists?: SavedList[];
 };
 export type ApprovalAction = typeof APPROVAL_ACTIONS[number];
 export type AppleSessionState = "READY" | "DEVICE_APPROVAL_PENDING";

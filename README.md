@@ -62,15 +62,15 @@ Review Git history before publishing a repository that previously contained priv
 | Tool | Behaviour |
 | --- | --- |
 | `connection_status` | Report connection state, session generation and read availability; does not contact Apple. |
-| `get_reminder_lists` | Start/resume catalogue synchronization, then return discovered current selectable lists. |
+| `get_reminder_lists` | Return current selectable lists through the configured direct or legacy discovery strategy. |
 | `get_reminder` | Read one exact ID, including completed or soft-deleted state, for current version tags and recovery. |
-| `get_reminders` | Synchronize the catalogue, then fetch one current page for a `listId`; open reminders by default. |
-| `get_all_open_reminders` | Synchronize the catalogue, then fetch open reminders across every discovered selectable list. |
 | `create_reminder` | Create one open reminder using a stable UUID `idempotencyKey`. |
 | `update_reminder` | Edit specified fields of one open reminder using its current `recordChangeTag`. |
 | `complete_reminder` | Complete one open reminder using its current version. |
 | `reopen_reminder` | Reopen one completed reminder and clear its completion date. |
 | `delete_reminder` | Soft-delete one open or completed reminder using its current version. |
+| `get_reminders` | Authorize an exact `listId` live, then fetch one current page without catalogue synchronization; open reminders by default. |
+| `get_all_open_reminders` | Discover selectable lists once per operation, then fetch open reminders with resumable per-list pages. |
 
 Tools return `structuredContent` plus a text copy for client compatibility. Every tool advertises
 a typed output schema for successful results and describes its parameters in the input schema.
@@ -228,7 +228,7 @@ configuration with Wrangler as a substitute for Sites publication.
    then choose it in a new chat. The endpoint is `https://<your-site>/mcp`. Sites manages the MCP
    OAuth connection; its non-user service token is not a substitute for the owner's identity.
 
-MCP reads themselves start and resume catalogue scans. This setup does not provision hourly
+In default legacy mode, list and all-open MCP calls start and resume catalogue scans; known-list reads bypass them. This setup does not provision hourly
 closed-page background checks on Sites. Dashboard polling only displays saved progress.
 
 ## Cloudflare Worker setup
@@ -340,8 +340,8 @@ Never send your Apple password, device code, encryption keys or cookies to the c
    respecting Apple’s retry time. **Check Apple approval** remains available if automatic checks
    pause after repeated errors or their safety limit. Device verification and Reminders-data
    approval are separate steps.
-6. Confirm the session is ready, then use a reminder MCP tool. Scanning starts automatically on
-   that call; no manual catalogue scan is required.
+6. Confirm the session is ready, then use a reminder MCP tool. Known-list reads verify access and
+   fetch reminders directly. List discovery uses the configured strategy described below.
 
 The local application session expires after at most 24 hours. Reads do not extend it. Apple can
 reject it sooner; reconnect when required. Disconnect deletes the encrypted session record,
@@ -349,42 +349,74 @@ catalogue and checkpoints. Expired records are cleared on next access, not by a 
 
 ## Use the dashboard
 
-Sign in to your private workspace, then select **Connect Apple account**. The status checklist
-shows whether Apple is connected, Reminders access is ready, lists have been found and the
-initial list scan is complete.
+Sign in to your private workspace, then select **Connect Apple account**. In experimental direct
+mode, **Your lists** shows the saved list count and last successful retrieval time. **Refresh lists**
+fetches current lists; a failed refresh keeps the previous snapshot visible and reports an error.
+The 15-second display polling reads saved status only and does not contact Apple.
 
-- **Start list scan** finds your lists. **Pause scan** stops the current browser request;
-  **Continue list scan** resumes from saved progress. Keep the page open during manual scans.
-- **Check for updates** reads changes after the saved checkpoint once the initial scan is complete.
-- **Preview reminders** lets you choose a list and show its open reminders, with an option to
-  include completed reminders. **Show more reminders** reads another bounded page.
-- **Testing & details** contains response details, list lookup and full-scan restart tools.
-- **Disconnect Apple account** asks for confirmation, then deletes the saved Apple session and
-  catalogue. **Sign out** ends your workspace login; it does not disconnect Apple.
-
-On ChatGPT Sites, MCP calls resume scans and check for updates without requiring this page to
-stay open. The dashboard does not imply that a recurring background runner is available.
+- **Preview reminders** verifies the selected list live and fetches open reminders. **Include
+  completed reminders** and **Show more reminders** retain their existing behavior.
+- **Testing & details** contains exact list lookup, response details and legacy scan diagnostics.
+- Default legacy mode retains **Start list scan**, **Continue list scan**, **Pause scan** and
+  **Check for updates**. Completed pages stay saved when the browser closes.
+- **Disconnect Apple account** deletes the encrypted session, snapshots and continuations.
+  Workspace sign-out does not disconnect Apple.
 
 ## Scanning and pagination
 
-The catalogue is a forward CloudKit change stream. Empty pages can be normal, and Apple does not
-report a total page count. Each successful page saves an encrypted checkpoint and authoritative
-list snapshots. MCP calls start from no checkpoint for an initial scan, or the saved checkpoint
-for incremental changes. Completing a reminder is reflected by the next live open-only query;
-this is not a persisted reminder-content cache.
+`REMINDERS_LIST_DISCOVERY=legacy` is the default. Setting it to `direct` explicitly opts into the
+experimental private CloudKit `Lists` query. Configure this in your runtime environment or ignored
+operator config, without changing public identity or approval placeholders. Unknown values fail
+with a configuration error. There is no automatic strategy change after an Apple error.
 
-Each MCP catalogue pass processes at most **25 pages within a 20-second budget**; an already-started
-Apple request retains its own timeout. If more work remains, the tool returns retryable
-`SYNC_IN_PROGRESS`. Repeat the same tool without inventing a cursor to continue saved progress.
-Each scan pass has a 1,000-page cap and detects repeated checkpoints. Protocol/token failures
-require attention rather than an infinite retry. Apple throttling and retry delays are respected.
+Direct discovery validates the authenticated private Reminders zone, sends `query.recordType=Lists`
+and accepts singular `List` records. It follows opaque `continuationMarker` pages without any
+`/changes/zone` calls. List membership, reminder titles, notes and attachments are not requested;
+no field projection is sent because support for `desiredKeys` on this special query is unverified.
+Extra returned fields are discarded from summaries. Empty lists are retained; MCP list results and
+all-open selection exclude deleted lists and groups. Shared-database lists are not discovered.
 
-`get_reminders` fetches one page of up to 200 reminders. `get_all_open_reminders` has independent
-20-page/time, 5,000-record and response-size bounds and a short-lived owner/session-bound
-continuation. Results across lists are not an atomic snapshot. No reminder changes are performed.
+**Live validation is limited to one account.** An approved local test on 2026-10-09 returned the
+owner's three expected lists, picked up a new list and removed it after deletion, with zero change
+calls. Live pagination, groups, renamed/old/empty-list coverage and shared-list completeness remain
+unverified, so direct mode stays opt-in. The [pinned external reference](https://github.com/fineyh/icloud-reminders-desktop/blob/3dbbbed9eef3d2f3a6d13be28475c2d4585504a0/src/backend/reminders_api.py)
+supports the request format, while synthetic tests cover parsing and bounded continuation handling. See
+[discovery evidence and validation procedure](docs/direct-list-retrieval.md).
 
-Manual dashboard scans are optional and pause when the page is closed or a request is interrupted.
-Completed pages remain saved. Without a configured scheduler, no Apple scans run between MCP calls.
+Each direct refresh is bounded to 25 query pages, 20 seconds, 1,000 identifiers and a 1 MiB summary
+budget with response overhead reserved. Individual transport timeouts still apply. A complete
+refresh atomically replaces the encrypted snapshot, including removals. Duplicate identical
+summaries are deduplicated; conflicting summaries, malformed records or wrong owners fail safely.
+Repeated continuations and incomplete/error pages never publish a complete catalogue. A bounded
+incomplete discovery returns `UNSUPPORTED_FEATURE` and preserves the last snapshot. List discovery
+does not expose a resumable MCP cursor; retry a refresh or explicitly choose legacy recovery for
+collections exceeding these bounds. No historical scan starts automatically after failure.
+
+Direct list responses report `source: "direct-cloudkit-query"` and `freshness.mode: "live"`.
+There is no TTL cache: normal direct list calls and explicit refreshes contact Apple. Saved dashboard
+summaries are display-only and are never proof of authorization for a reminder read.
+`get_reminders` validates its exact list ID with a current owner-bound lookup, rejects inaccessible,
+deleted or group records, then runs the existing live `reminderList` query. A missing, pending or
+expired historical checkpoint does not block this path, in either discovery mode.
+
+`get_reminders` returns one bounded page; pass its continuation with the same list ID and completed
+option. `get_all_open_reminders` discovers lists once when starting and saves its selection in the
+encrypted session. Resumptions use that original selection even after a separate refresh. It keeps
+independent 20-page/20-second, 5,000-record and response-size bounds, with a single-use, ten-minute
+owner/session-bound continuation. Combine successful pages, inspect failures before retrying and
+respect `retryAfterSeconds`. `complete: true` requires every selected list to finish successfully.
+Results across lists are not an atomic Apple snapshot. Reminder contents are never persisted.
+
+Legacy recovery keeps the forward change scanner and encrypted resumable checkpoints. List and
+initial all-open calls process at most 25 history pages within 20 seconds and can return retryable
+`SYNC_IN_PROGRESS`; repeat without inventing a cursor. A pass has a 1,000-page cap. Expired tokens
+require an explicit diagnostic restart. After a direct snapshot exists, legacy recovery uses a
+separate encrypted list collection so historical work cannot overwrite that snapshot. Existing
+version-1 sessions remain compatible; no D1 migration or session reset is required.
+
+Direct mode suppresses automatic catalogue scanning. Legacy background execution is optional and
+requires a configured runner. ChatGPT Sites does not provision a scheduled Worker trigger; ordinary
+known-list reads work without one in both modes.
 
 For optional unattended scanning on a **standalone Worker**, add both of these to the ignored
 production config, then deploy:

@@ -53,6 +53,12 @@ application's local 24-hour session limit.
   to SMS, voice or legacy authentication. Reject missing, mismatched or replayed protocol proofs.
 - Keep the absolute session lifetime bounded. Reads must not extend it. Disconnect must clear
   stored session state; expiry must reject reads and clear expired records on access.
+- Authorize known list IDs with a current exact private-zone lookup; encrypted saved summaries
+  alone are never proof of access. Reject wrong zone/owner, deleted lists and groups before content
+  reads. Direct discovery must be explicitly selected and must not silently fall back on errors.
+- Commit direct list snapshots only after complete, bounded discovery. Keep legacy recovery state
+  separate from newer direct evidence. All-open continuations retain their original list selection,
+  remain single-use and expire with the session or after ten minutes.
 - Allow reminder mutations only for the bound authenticated owner with a current ready Apple
   session. Exact private-zone list and reminder lookups must precede a write.
   Use only bounded single-record create/update operations, deterministic create IDs and exact
