@@ -370,6 +370,10 @@ Actions PR. Routine bot updates enable squash auto-merge automatically; the four
 CI checks must pass before merging. Major upgrades remain manual, and failed updates stay blocked.
 Merged branches are deleted automatically. The automation follows the
 [email MCP server's workflow](https://github.com/Xzese/email-mcp-for-cloudflare-workers/blob/main/.github/workflows/dependabot-auto-merge.yml).
+Builds also refresh the dependency inventory and third-party notices automatically, so a
+dependency update ships current attribution without a separate generated-file PR. The local
+and acceptance runners declare their Miniflare API version explicitly; a Wrangler update
+does not silently migrate those runners to a new major API.
 
 ```text
 src/

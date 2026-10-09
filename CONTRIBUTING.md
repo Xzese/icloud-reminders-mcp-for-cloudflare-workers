@@ -77,6 +77,13 @@ repository's Dependabot bot; all four protected-branch checks must pass against 
 branch. Failed checks remain blocked. Major upgrades require manual review and are not opted into
 auto-merge. Keep the write-token workflow free of PR checkouts, installs or scripts from PR branches.
 
+The acceptance runners and local launcher use the explicitly declared Miniflare 4 API and
+Undici dependencies. Keep Miniflare major upgrades in a reviewed migration rather than
+implicitly inheriting Wrangler's internal version. Builds refresh dependency inventories and
+third-party notices automatically from the lockfile and installed packages; include refreshed
+snapshots in the dependency PR when updating packages. `npm run notices:generate` also refreshes
+them without building. Generated notices do not require a separate PR.
+
 Preserve upstream attribution and license notices when changing protocol or vendored code.
 Fixture regeneration is optional: the checked-in vectors in `tests/fixtures/` are sufficient to run CI. To regenerate,
 install the pinned Python packages listed in provenance/sources.json, check out its pinned pyicloud

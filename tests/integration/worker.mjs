@@ -178,7 +178,9 @@ try {
       assert.deepEqual(await req.clone().json(), { zones: [{ zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: "synthetic-private-owner" }, desiredRecordTypes: ["List", "Reminder"], reverse: true, desiredKeys: ["Name", "Color", "Count", "IsGroup", "Deleted", "List"], ...(catalogueRequestCount === 1 ? { syncToken: "synthetic-empty-checkpoint" } : {}) }], resultsLimit: 200 });
       catalogueRequestCount++;
     }
-    return mockFetch(req, { dispatcher: fetchMock });
+    // Miniflare and the harness can use different Undici versions. Transfer
+    // web-standard fields instead of passing a version-branded Request object.
+    return mockFetch(req.url, { method: req.method, headers: Object.fromEntries(req.headers), body: req.body, duplex: "half", redirect: "manual", signal: req.signal, dispatcher: fetchMock });
   } };
   await worker.dispose(); worker = new Miniflare(withScheduler(enabledOptions));
   const openAuth = async (generation, requestOrigin = origin) => worker.dispatchFetch(`${origin}/api/auth/socket?generation=${generation}`, { headers: { "oai-authenticated-user-id": owner, upgrade: "websocket", origin: requestOrigin, "sec-websocket-protocol": "reminders-auth-v2" } });

@@ -7,6 +7,16 @@ const [command, ...args] = process.argv.slice(2);
 if (!["dev", "build"].includes(command)) throw new Error("Expected dev or build.");
 const managedLinux = readExecutionProfile() === "managed-linux";
 
+// Dependency PRs should ship current notices in the same build, without a
+// separate generated-file PR. Installed metadata also covers nested versions.
+if (command === "build") {
+  const notices = spawnSync(process.execPath, [
+    fileURLToPath(new URL("../release/generate-notices.mjs", import.meta.url)),
+  ], { stdio: "inherit" });
+  if (notices.error) throw notices.error;
+  if (notices.status !== 0) process.exit(notices.status ?? 1);
+}
+
 if (managedLinux && command === "build") {
   const result = spawnSync("bash", [
     fileURLToPath(new URL("./build-verified.sh", import.meta.url)), ...args,
