@@ -209,6 +209,111 @@ test("query pages expose partial per-record errors and continuation; normalizers
   assert.equal((reminder.raw.fields as Record<string, unknown>).CustomFutureField !== undefined, true);
 });
 
+test("experimental plural Lists query bootstraps the validated private zone and accepts singular List records", async () => {
+  const owner = "_private-owner";
+  const { api, requests } = clientWith([
+    { body: { zones: [{ zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: owner } }] } },
+    { body: { records: [listRecord()], continuationMarker: "lists-next" } },
+  ]);
+  const page = await api.queryListsPage({ limit: 25 });
+  assert.equal(page.records.length, 1);
+  assert.equal(page.complete, false);
+  assert.equal(page.continuation, "lists-next");
+  assert.equal(requests.length, 2);
+  assert.equal(requests[1].url.pathname, "/database/1/com.apple.reminders/production/private/records/query");
+  assert.deepEqual(requests[1].body, {
+    query: { recordType: "Lists" },
+    zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: owner },
+    resultsLimit: 25,
+  });
+  const wrongType = clientWith([{ body: { records: [{ ...listRecord(), recordName: "Lists/LIST-A", recordType: "Lists" }] } }], { ...connection, remindersZoneOwner: owner });
+  await assert.rejects(wrongType.api.queryListsPage(), AppError);
+  const wrongErrorType = clientWith([{ body: { records: [{ recordName: "Reminder/NOT-A-LIST", serverErrorCode: "UNKNOWN_ITEM" }] } }], { ...connection, remindersZoneOwner: owner });
+  await assert.rejects(wrongErrorType.api.queryListsPage(), AppError);
+  const missingContinuation = clientWith([{ body: { records: [], moreComing: true } }], { ...connection, remindersZoneOwner: owner });
+  await assert.rejects(missingContinuation.api.queryListsPage(), AppError);
+  const malformedContinuation = clientWith([{ body: { records: [], continuationMarker: 42 } }], { ...connection, remindersZoneOwner: owner });
+  await assert.rejects(malformedContinuation.api.queryListsPage(), AppError);
+});
+
+test("queryAllLists follows continuations, deduplicates summaries, and retains groups and deleted lists without raw contents", async () => {
+  const group = { ...listRecord("List/GROUP"), fields: { Name: { type: "STRING", value: "Folder" }, IsGroup: { type: "INT64", value: 1 } } };
+  const deleted = { ...listRecord("List/DELETED"), deleted: false, fields: { Name: { type: "STRING", value: "Removed" }, Deleted: { type: "INT64", value: 1 } } };
+  const { api, requests } = clientWith([
+    { body: { records: [listRecord(), group], continuationMarker: "lists-page-2" } },
+    { body: { records: [listRecord(), deleted, { recordName: "List/TOMBSTONE", deleted: true }] } },
+  ], { ...connection, remindersZoneOwner: "_private-owner" });
+  const result = await api.queryAllLists();
+  assert.equal(result.complete, true);
+  assert.equal(result.pagesRead, 2);
+  assert.equal(requests.length, 2);
+  assert.equal(result.lists.length, 4);
+  assert.equal(result.lists.find(list => list.id === "List/GROUP")?.isGroup, true);
+  assert.equal(result.lists.find(list => list.id === "List/DELETED")?.deleted, true);
+  assert.equal(result.lists.find(list => list.id === "List/TOMBSTONE")?.deleted, true);
+  assert.ok(result.lists.every(list => list.reminderIds === null && Object.keys(list.raw).length === 0));
+  assert.equal(requests.every(request => !Object.hasOwn(request.body, "desiredKeys")), true);
+  assert.deepEqual(requests[1].body, {
+    query: { recordType: "Lists" },
+    zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: "_private-owner" },
+    resultsLimit: 200,
+    continuationMarker: "lists-page-2",
+  });
+});
+
+test("queryAllLists reports record errors and continuation cycles as incomplete", async () => {
+  const errors = clientWith([{ body: { records: [{ recordName: "List/FAILED", serverErrorCode: "CONFLICT", reason: "private reason" }] } }], { ...connection, remindersZoneOwner: "_private-owner" });
+  assert.deepEqual(await errors.api.queryAllLists(), { lists: [], complete: false, pagesRead: 1, pendingReason: "record_errors" });
+  const authentication = clientWith([{ body: { records: [{ recordName: "List/FAILED", serverErrorCode: "AUTHENTICATION_REQUIRED" }] } }], { ...connection, remindersZoneOwner: "_private-owner" });
+  await assert.rejects(authentication.api.queryAllLists(), (error: unknown) => error instanceof AppError && error.code === "REAUTH_REQUIRED");
+  const cycle = clientWith([
+    { body: { records: [], continuationMarker: "cycle-a" } },
+    { body: { records: [], continuationMarker: "cycle-b" } },
+    { body: { records: [], continuationMarker: "cycle-a" } },
+  ], { ...connection, remindersZoneOwner: "_private-owner" });
+  assert.deepEqual(await cycle.api.queryAllLists(), { lists: [], complete: false, pagesRead: 3, pendingReason: "continuation_cycle" });
+  const immediate = clientWith([
+    { body: { records: [], continuationMarker: "same" } },
+    { body: { records: [], continuationMarker: "same" } },
+  ], { ...connection, remindersZoneOwner: "_private-owner" });
+  assert.deepEqual(await immediate.api.queryAllLists(), { lists: [], complete: false, pagesRead: 2, pendingReason: "continuation_cycle" });
+});
+
+test("queryAllLists fails conflicting duplicates, malformed records, and unavailable or foreign private zones", async () => {
+  const conflict = clientWith([
+    { body: { records: [listRecord()], continuationMarker: "next" } },
+    { body: { records: [{ ...listRecord(), fields: { Name: { type: "STRING", value: "Changed title" } } }] } },
+  ], { ...connection, remindersZoneOwner: "_private-owner" });
+  await assert.rejects(conflict.api.queryAllLists(), AppError);
+  const malformed = clientWith([{ body: { records: [{ recordName: "List/BAD", recordType: "List", fields: { Count: { type: "STRING", value: "many" } } }] } }], { ...connection, remindersZoneOwner: "_private-owner" });
+  await assert.rejects(malformed.api.queryAllLists(), AppError);
+  const absent = clientWith([{ body: { zones: [] } }]);
+  await assert.rejects(absent.api.queryListsPage(), AppError);
+  assert.equal(absent.requests.length, 1);
+  const foreign = clientWith([
+    { body: { zones: [{ zoneID: { zoneName: "Reminders", ownerRecordName: "_private-owner" } }] } },
+    { body: { records: [{ ...listRecord(), zoneID: { zoneName: "Reminders", ownerRecordName: "_foreign-owner" } }] } },
+  ]);
+  await assert.rejects(foreign.api.queryListsPage(), AppError);
+});
+
+test("queryAllLists stops at the aggregate summary byte and page budgets", async () => {
+  const largePage = (page: number) => Array.from({ length: 150 }, (_, index) => ({
+    recordName: `List/B${page}-${index}`,
+    recordType: "List",
+    fields: { Name: { type: "STRING", value: "x".repeat(1_000) } },
+  }));
+  const byteResponses = Array.from({ length: 8 }, (_, page) => ({ body: { records: largePage(page), ...(page < 7 ? { continuationMarker: `byte-${page + 1}` } : {}) } }));
+  const bytes = clientWith(byteResponses, { ...connection, remindersZoneOwner: "_private-owner" });
+  const byteResult = await bytes.api.queryAllLists();
+  assert.equal(byteResult.complete, false);
+  assert.equal(byteResult.pendingReason, "summary_byte_limit");
+  assert.ok(byteResult.lists.length < 1_200);
+  const pageResponses = Array.from({ length: 25 }, (_, page) => ({ body: { records: [], continuationMarker: `page-${page + 1}` } }));
+  const pages = clientWith(pageResponses, { ...connection, remindersZoneOwner: "_private-owner" });
+  assert.deepEqual(await pages.api.queryAllLists(), { lists: [], complete: false, pagesRead: 25, pendingReason: "page_limit" });
+});
+
 test("200-reminder compound pages accept related records but retain hard record and request limits", async () => {
   const records = Array.from({ length: 200 }, (_, index) => ({ ...reminderRecord("Task"), recordName: `Reminder/R-${index}` }));
   const alarms = Array.from({ length: 400 }, (_, index) => ({ recordName: `Alarm/A-${index}`, recordType: "Alarm", fields: {} }));

@@ -3,6 +3,7 @@ import { AppleSessionRepository } from "../persistence/apple-sessions.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
 import { AppleConnectionService } from "./service.ts";
 import { appleGates } from "./gates.ts";
+import { listDiscoveryStrategy } from "./list-discovery.ts";
 
 export interface CatalogueBackgroundResult {
   started: boolean;
@@ -17,6 +18,7 @@ export async function runCatalogueBackground(env: RuntimeEnv): Promise<Catalogue
   let started = false;
   let pages = 0;
   let pending = false;
+  if (listDiscoveryStrategy(env) === "direct") return { started, pages, pending, reason: "direct-discovery" };
   if (!env.REMINDERS_OWNER_ID) return { started, pages, pending, reason: "owner-not-configured" };
   if (env.CATALOGUE_BACKGROUND_RUNNER !== "local" && env.CATALOGUE_BACKGROUND_RUNNER !== "cron") return { started, pages, pending, reason: "not-configured" };
   if (!appleGates(env).enabled) return { started, pages, pending, reason: "apple-disabled" };

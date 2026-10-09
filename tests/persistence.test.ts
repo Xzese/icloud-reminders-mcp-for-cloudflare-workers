@@ -299,7 +299,7 @@ test("catalogue checkpoints resume, start incremental passes, preserve failures,
   } finally { globalThis.fetch = originalFetch; db.sqlite.close(); }
 });
 
-test("MCP initializes and resumes catalogue without a runner; local background and demand checks stay bounded", async () => {
+test("Legacy MCP list discovery initializes and resumes catalogue without a runner; local background and demand checks stay bounded", async () => {
   const originalNow = Date.now; const originalFetch = globalThis.fetch;
   let now = originalNow(); Date.now = () => now;
   const db = new SQLiteD1(); const repository = appleRepo(db);
@@ -309,7 +309,7 @@ test("MCP initializes and resumes catalogue without a runner; local background a
   const env = { ...db.env(), REMINDERS_OWNER_ID: owner, CATALOGUE_BACKGROUND_RUNNER: "local" as const, ENCRYPTION_KEY_ID: repository.envelopes.active, ENCRYPTION_KEYS_JSON: JSON.stringify(repository.envelopes.keys), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" };
   const service = () => new AppleConnectionService(env, owner);
   const toggle = (enabled: boolean) => service().read(ControlledRead.parse({ action: "catalogue-auto", expectedGeneration: setup.generation, enabled }));
-  const demand = () => service().readForMCP(ControlledRead.parse({ action: "reminders", expectedGeneration: setup.generation, listId: "List/AUTO", includeCompleted: false }));
+  const demand = () => service().readForMCP(ControlledRead.parse({ action: "saved-lists", expectedGeneration: setup.generation }));
   const changes = (token: string, pending: boolean, records: unknown[] = []) => ({ zones: [{ zoneID: { zoneName: "Reminders" }, syncToken: token, moreComing: pending, records }] });
   const replies: { body: unknown; status?: number; headers?: Record<string, string>; after?: () => Promise<void> }[] = [];
   const requests: { path: string; body: Record<string, unknown> }[] = [];
@@ -330,7 +330,7 @@ test("MCP initializes and resumes catalogue without a runner; local background a
     for (let page = 1; page <= 25; page++) replies.push({ body: changes(`initial-${page}`, true), ...(page === 1 ? { after: async () => { secondRunner = await runCatalogueBackground(env); } } : {}) });
     // No manual catalogue scan and no configured scheduler: the first MCP read
     // must commit its bounded initial pages rather than refuse to start.
-    await assert.rejects(new AppleConnectionService({ ...env, CATALOGUE_BACKGROUND_RUNNER: undefined }, owner).readForMCP(ControlledRead.parse({ action: "reminders", expectedGeneration: setup.generation, listId: "List/AUTO", includeCompleted: false })), inProgress);
+    await assert.rejects(new AppleConnectionService({ ...env, CATALOGUE_BACKGROUND_RUNNER: undefined }, owner).readForMCP(ControlledRead.parse({ action: "saved-lists", expectedGeneration: setup.generation })), inProgress);
     assert.equal(secondRunner?.reason, "CONFLICT"); assert.equal(secondRunner?.pages, 0);
     const afterBudget = (await repository.load()).session;
     assert.equal(afterBudget.catalogueSync?.initialPages, 25); assert.equal(afterBudget.catalogueSync?.totalPages, 25);
@@ -346,11 +346,11 @@ test("MCP initializes and resumes catalogue without a runner; local background a
     await assert.rejects(demand(), (error: unknown) => error instanceof AppError && error.code === "RATE_LIMITED");
     assert.equal(requests.length, beforeCooldownRetry);
     now += 1_800_000;
-    replies.push({ body: changes("initial-26", true) }, { body: changes("initial-27", false) }, { body: { records: [] } });
+    replies.push({ body: changes("initial-26", true) }, { body: changes("initial-27", false) });
     const initialized = await demand();
-    assert.deepEqual(initialized.result.records, []);
+    assert.equal((initialized.result.records as Record<string, unknown>[])[0].id, "List/AUTO");
     assert.equal((requests[beforeCooldownRetry].body.zones as Record<string, unknown>[])[0].syncToken, "initial-25");
-    assert.ok(requests.at(-1)!.path.endsWith("/records/query"));
+    assert.ok(requests.at(-1)!.path.endsWith("/changes/zone"));
     const initialComplete = (await repository.load()).session;
     assert.equal(initialComplete.catalogueSync?.initialPages, 27); assert.equal(initialComplete.catalogueSync?.lastPassPages, 27);
     assert.equal(initialComplete.catalogueAuto?.nextCheckAt, now + 3_600_000); assert.deepEqual(initialComplete.login, session.login);
@@ -372,26 +372,21 @@ test("MCP initializes and resumes catalogue without a runner; local background a
     assert.equal((await runCatalogueBackground(env)).reason, "not-due");
     await toggle(false); assert.equal((await runCatalogueBackground(env)).reason, "disabled");
     // Demand ignores routine due dates and disabled background preference,
-    // catches up with exact list lookup, then queries current contents.
+    // catches up with exact list lookup, then returns the current saved list snapshot.
     const list = (title: string) => ({ recordName: "List/AUTO", recordType: "List", fields: { Name: { type: "STRING", value: title } } });
-    const open = { recordName: "Reminder/OPEN", recordType: "Reminder", fields: { List: { type: "REFERENCE", value: { recordName: "List/AUTO", action: "VALIDATE" } }, Completed: { type: "INT64", value: 0 } } };
-    replies.push({ body: changes("delta-1", true, [list("Old historical name")]) }, { body: { records: [list("Renamed current list")] } }, { body: changes("delta-2", false) }, { body: { records: [open] } });
+    replies.push({ body: changes("delta-1", true, [list("Old historical name")]) }, { body: { records: [list("Renamed current list")] } }, { body: changes("delta-2", false) });
     const current = await demand();
     assert.equal(current.result.freshness.mode, "checkpoint-then-live-query"); assert.equal(current.result.freshness.caughtUpAt, now);
-    assert.equal((current.result.records as Record<string, unknown>[])[0].completed, false);
     assert.equal((await repository.load()).session.savedLists?.[0].title, "Renamed current list");
-    const query = requests.at(-1)!.body.query as { filterBy: { fieldName: string; fieldValue: { value: number } }[] };
-    assert.equal(query.filterBy.find(filter => filter.fieldName === "includeCompleted")?.fieldValue.value, 0);
-    assert.equal(requests.at(-1)!.path.endsWith("/records/query"), true);
     await toggle(true);
     // Budget exhaustion never returns a stale saved catalogue or reminder page.
     const beforeDemandBudget = requests.length;
     for (let page = 1; page <= 25; page++) replies.push({ body: changes(`demand-${page}`, true) });
     await assert.rejects(demand(), inProgress);
     assert.equal(requests.length, beforeDemandBudget + 25); assert.ok(requests.slice(beforeDemandBudget).every(request => request.path.endsWith("/changes/zone")));
-    replies.push({ body: changes("demand-26", true) }, { body: changes("demand-27", false) }, { body: { records: [] } });
+    replies.push({ body: changes("demand-26", true) }, { body: changes("demand-27", false) });
     const completedElsewhere = await demand();
-    assert.deepEqual(completedElsewhere.result.records, []);
+    assert.equal((completedElsewhere.result.records as Record<string, unknown>[])[0].title, "Renamed current list");
     assert.equal((await repository.load()).session.catalogueSync?.initialPages, 27); assert.equal((await repository.load()).session.catalogueSync?.lastPassPages, 27);
     replies.push({ body: changes("deadline-pending", true), after: async () => { now += 20_000; } });
     await assert.rejects(demand(), inProgress);
@@ -428,7 +423,7 @@ test("MCP initializes and resumes catalogue without a runner; local background a
     const beforeThrottle = requests.length;
     await assert.rejects(demand(), (error: unknown) => error instanceof AppError && error.code === "RATE_LIMITED"); assert.equal(requests.length, beforeThrottle);
     now += 1_800_000;
-    replies.push({ body: changes("manual-restarted", false) }, { body: { records: [] } }); await demand();
+    replies.push({ body: changes("manual-restarted", false) }); await demand();
     assert.equal((await repository.load()).session.catalogueAuto?.lastErrorCode, null);
     assert.deepEqual((await repository.load()).session.login, session.login);
     replies.push({ body: changes("never-committed", false), after: async () => { await repository.disconnect(); } });
@@ -549,5 +544,159 @@ test("all-open reads cover selectable lists, resume live pages without skips, an
     replies.push({ body: changes }, { body: { records: [reminder("LATE", "List/A")] }, after: async () => { await repository.disconnect(); } });
     await assert.rejects(service().readAllOpenForMCP(nextSetup.generation), (error: unknown) => error instanceof AppError && ["NOT_CONNECTED", "CONFLICT"].includes(error.code));
     assert.equal((await repository.status()).state, "DISCONNECTED");
+  } finally { globalThis.fetch = originalFetch; Date.now = originalNow; db.sqlite.close(); }
+});
+
+test("direct list snapshots replace only after complete discovery and stay isolated from legacy history", async () => {
+  const originalFetch = globalThis.fetch;
+  const db = new SQLiteD1(), repository = appleRepo(db), session = appleSession();
+  session.savedLists = mergeSavedLists([], [{ id: "List/OLD", title: "Previous snapshot" }], true);
+  session.catalogueSync = { token: "expired-history", initialComplete: false, pending: true, pages: 4, seen: [], updatedAt: Date.now() };
+  const setup = await repository.begin(0); await repository.commit(setup, session, "READY");
+  const env = { ...db.env(), REMINDERS_LIST_DISCOVERY: "direct", CATALOGUE_BACKGROUND_RUNNER: "local" as const, REMINDERS_OWNER_ID: owner, ENCRYPTION_KEY_ID: repository.envelopes.active, ENCRYPTION_KEYS_JSON: JSON.stringify(repository.envelopes.keys), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" };
+  const service = () => new AppleConnectionService(env, owner);
+  const zoneID = { zoneName: "Reminders", ownerRecordName: "synthetic-direct-owner" };
+  const list = (id: string, title: string, extra = {}) => ({ recordName: id, recordType: "List", zoneID, fields: { Name: { type: "STRING", value: title }, Count: { type: "INT64", value: 0 }, ...extra } });
+  const requests: { path: string; body: Record<string, unknown> }[] = [];
+  const replies: { body: unknown; status?: number; after?: () => Promise<void> }[] = [];
+  globalThis.fetch = async (input, init) => {
+    requests.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) });
+    const next = replies.shift(); assert.ok(next, "Unexpected direct discovery request");
+    if (next.after) await next.after();
+    return new Response(JSON.stringify(next.body), { status: next.status ?? 200 });
+  };
+  try {
+    assert.equal((await runCatalogueBackground(env)).reason, "direct-discovery");
+    replies.push({ body: { zones: [{ zoneID }] } }, { body: { records: [list("List/EMPTY", "Empty list"), list("List/GROUP", "Group", { IsGroup: { type: "INT64", value: 1 } })], continuationMarker: "direct-next" } }, { body: { records: [{ ...list("List/DELETED", "Removed", { Deleted: { type: "INT64", value: 1 } }), deleted: false }, list("List/NEW", "Current name")] } });
+    const first = await service().getCurrentLists(setup.generation);
+    assert.equal(first.result.complete, true); assert.equal(first.result.source, "direct-cloudkit-query"); assert.equal(first.result.freshness.mode, "live");
+    assert.equal(first.result.records.find(item => item.id === "List/DELETED")?.deleted, true); assert.equal(first.result.records.length, 4); assert.equal(first.result.records[0].count, 0);
+    const snapshot = (await repository.load()).session;
+    assert.equal(snapshot.savedLists?.some(item => item.id === "List/OLD"), false);
+    assert.equal(snapshot.legacySavedLists?.[0].id, "List/OLD"); assert.deepEqual(snapshot.catalogueSync, session.catalogueSync);
+    assert.ok(requests.every(request => !request.path.endsWith("/changes/zone")));
+    const count = requests.length;
+    await service().read(ControlledRead.parse({ action: "saved-lists", expectedGeneration: setup.generation }));
+    assert.equal(requests.length, count, "Dashboard polling must be display-only");
+    // Record failures and HTTP errors never erase the last complete snapshot.
+    for (const reply of [{ body: { records: [{ recordName: "List/NEW", serverErrorCode: "BAD_REQUEST" }] } }, { body: {}, status: 503 }, { body: {}, status: 403 }]) {
+      replies.push(reply); await assert.rejects(service().getCurrentLists(setup.generation), AppError);
+      assert.deepEqual((await repository.load()).session.savedLists, snapshot.savedLists);
+    }
+    // A diagnostic legacy scan writes only its separate recovery collection.
+    replies.push({ body: { zones: [{ zoneID, syncToken: "legacy-next", moreComing: false, records: [list("List/OLD", "Historical candidate")] }] } }, { body: { records: [list("List/OLD", "Current legacy name")] } });
+    await service().read(ControlledRead.parse({ action: "sync-catalogue", expectedGeneration: setup.generation }));
+    assert.deepEqual((await repository.load()).session.savedLists, snapshot.savedLists);
+    assert.equal((await repository.load()).session.legacySavedLists?.[0].title, "Current legacy name");
+    // Refresh reflects renames/removals and a genuinely empty collection.
+    replies.push({ body: { records: [list("List/NEW", "Renamed")] } }); await service().getCurrentLists(setup.generation);
+    assert.deepEqual((await repository.load()).session.savedLists?.map(item => item.title), ["Renamed"]);
+    replies.push({ body: { records: [] } }); assert.equal((await service().getCurrentLists(setup.generation)).result.records.length, 0);
+    assert.deepEqual((await repository.load()).session.savedLists, []);
+    // A failed encrypted commit cannot publish new summaries or corrupt saved ones.
+    const encrypt = Envelopes.prototype.encrypt;
+    replies.push({ body: { records: [list("List/NEW", "Must not be saved")] } });
+    Envelopes.prototype.encrypt = async () => { throw new Error("synthetic encryption failure"); };
+    try { await assert.rejects(service().getCurrentLists(setup.generation)); }
+    finally { Envelopes.prototype.encrypt = encrypt; }
+    assert.deepEqual((await repository.load()).session.savedLists, []);
+    replies.push({ body: { records: [list("List/NEW", "Never committed")] }, after: async () => { await repository.disconnect(); } });
+    await assert.rejects(service().getCurrentLists(setup.generation), (e: unknown) => e instanceof AppError && ["NOT_CONNECTED", "CONFLICT"].includes(e.code));
+    assert.equal((await repository.status()).state, "DISCONNECTED"); assert.equal(replies.length, 0);
+  } finally { globalThis.fetch = originalFetch; db.sqlite.close(); }
+});
+
+test("known-list reads authorize live without any historical checkpoint and fence failures", async () => {
+  const originalFetch = globalThis.fetch, originalNow = Date.now;
+  const db = new SQLiteD1(), repository = appleRepo(db), session = appleSession();
+  const setup = await repository.begin(0); await repository.commit(setup, session, "READY");
+  const env = { ...db.env(), ENCRYPTION_KEY_ID: repository.envelopes.active, ENCRYPTION_KEYS_JSON: JSON.stringify(repository.envelopes.keys), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" };
+  const service = () => new AppleConnectionService(env, owner);
+  const input = (includeCompleted = false, continuation: string | null = null) => ControlledRead.parse({ action: "reminders", expectedGeneration: setup.generation, listId: "List/KNOWN", includeCompleted, continuation });
+  const zoneID = { zoneName: "Reminders", ownerRecordName: "synthetic-known-owner" };
+  const list = { recordName: "List/KNOWN", recordType: "List", zoneID, fields: { Name: { type: "STRING", value: "Current authorized list" } } };
+  const reminder = (id: string, completed: number, listId = "List/KNOWN") => ({ recordName: id, recordType: "Reminder", zoneID, fields: { List: { type: "REFERENCE", value: { recordName: listId, action: "VALIDATE", zoneID } }, Completed: { type: "INT64", value: completed } } });
+  const requests: { path: string; body: Record<string, unknown> }[] = [];
+  const replies: { body: unknown; status?: number; headers?: Record<string, string>; after?: () => Promise<void> }[] = [];
+  globalThis.fetch = async (url, init) => {
+    requests.push({ path: new URL(String(url)).pathname, body: JSON.parse(String(init?.body)) });
+    const reply = replies.shift(); assert.ok(reply, "Unexpected known-list request");
+    if (reply.after) await reply.after();
+    return new Response(JSON.stringify(reply.body), { status: reply.status ?? 200, headers: reply.headers });
+  };
+  try {
+    replies.push({ body: { zones: [{ zoneID }] } }, { body: { records: [list] } }, { body: { records: [reminder("Reminder/OPEN", 0), reminder("Reminder/CLOSED", 1), { recordName: "Alarm/A", recordType: "Alarm", zoneID, fields: {} }], continuationMarker: "known-next" } });
+    const first = await service().readForMCP(input());
+    assert.deepEqual((first.result.records as { id: string }[]).map(item => item.id), ["Reminder/OPEN"]); assert.equal(first.result.continuation, "known-next");
+    assert.equal((await repository.load()).session.catalogueSync, undefined);
+    const saved = await repository.load(), lease = await repository.claimRead(saved.fence.generation, saved.fence.version);
+    await repository.commitResume(lease, { ...saved.session, catalogueSync: { token: "expired-checkpoint", initialComplete: false, pending: true, pages: 5, seen: [], updatedAt: Date.now() }, catalogueAuto: { policy: "initial-and-hourly", enabled: true, nextCheckAt: null, lastCheckAt: null, lastSuccessAt: null, lastErrorCode: "RESTART_REQUIRED", pausedForError: true, failures: 1, runId: null, runUntil: 0 } }, "READY");
+    replies.push({ body: { records: [list] } }, { body: { records: [reminder("Reminder/CLOSED", 1)] } });
+    const second = await service().readForMCP(input(true, "known-next"));
+    assert.equal((second.result.records as { completed: boolean }[])[0].completed, true);
+    assert.equal(requests.at(-1)!.body.continuationMarker, "known-next");
+    assert.ok(requests.every(request => !request.path.endsWith("/changes/zone")));
+    for (const invalid of ["List/A/B", "List/ bad", "List/a\n", "Reminder/A"]) assert.equal(ControlledRead.safeParse({ ...input(), listId: invalid }).success, false);
+    for (const bad of [{ ...list, deleted: true }, { ...list, fields: { IsGroup: { type: "INT64", value: 1 } } }, { recordName: list.recordName, serverErrorCode: "NOT_FOUND" }, { ...list, zoneID: { ...zoneID, ownerRecordName: "other-owner" } }]) {
+      const before = requests.length; replies.push({ body: { records: [bad] } });
+      await assert.rejects(service().readForMCP(input()), AppError); assert.equal(requests.length, before + 1);
+    }
+    for (const reply of [{ status: 403, body: {} }, { status: 429, headers: { "retry-after": "9" }, body: {} }, { status: 503, body: {} }, { body: { records: [{}] } }]) {
+      replies.push(reply); await assert.rejects(service().readForMCP(input()), AppError);
+    }
+    replies.push({ body: { records: [list] } }, { body: { records: [reminder("Reminder/OTHER", 0, "List/OTHER")] } });
+    await assert.rejects(service().readForMCP(input()), (e: unknown) => e instanceof AppError && e.code === "PROTOCOL_CHANGED");
+    replies.push({ body: { records: [list] } }, { body: { records: [] }, after: async () => { Date.now = () => session.login.expiresAt; } });
+    await assert.rejects(service().readForMCP(input()), (e: unknown) => e instanceof AppError && e.code === "AUTH_EXPIRED"); Date.now = originalNow;
+    assert.equal((await repository.status()).state, "DISCONNECTED"); assert.equal(replies.length, 0);
+  } finally { globalThis.fetch = originalFetch; Date.now = originalNow; db.sqlite.close(); }
+});
+
+test("direct all-open resumes its original list selection without rediscovery after a refresh", async () => {
+  const originalFetch = globalThis.fetch, originalNow = Date.now;
+  let now = originalNow(); Date.now = () => now;
+  const db = new SQLiteD1(), repository = appleRepo(db), session = appleSession();
+  session.connection.remindersZoneOwner = "__defaultOwner__";
+  const setup = await repository.begin(0); await repository.commit(setup, session, "READY");
+  const env = { ...db.env(), REMINDERS_LIST_DISCOVERY: "direct", ENCRYPTION_KEY_ID: repository.envelopes.active, ENCRYPTION_KEYS_JSON: JSON.stringify(repository.envelopes.keys), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" };
+  const service = () => new AppleConnectionService(env, owner);
+  const list = (id: string, extra = {}) => ({ recordName: id, recordType: "List", fields: { Name: { type: "STRING", value: id.slice(5) }, ...extra } });
+  const reminder = (id: string, listId: string) => ({ recordName: id, recordType: "Reminder", fields: { List: { type: "REFERENCE", value: { recordName: listId, action: "VALIDATE" } }, Completed: { type: "INT64", value: 0 } } });
+  const requests: Record<string, unknown>[] = [];
+  const replies: { body: unknown; after?: () => void }[] = [];
+  globalThis.fetch = async (_url, init) => {
+    requests.push(JSON.parse(String(init?.body))); const next = replies.shift(); assert.ok(next, "Unexpected direct all-open request"); next.after?.();
+    return new Response(JSON.stringify(next.body));
+  };
+  try {
+    replies.push({ body: { records: [list("List/A"), list("List/EMPTY"), list("List/GROUP", { IsGroup: { type: "INT64", value: 1 } }), list("List/DELETED", { Deleted: { type: "INT64", value: 1 } })] } }, { body: { records: [reminder("Reminder/A1", "List/A")], continuationMarker: "a-next" }, after: () => { now += 20_000; } });
+    const first = await service().readAllOpenForMCP(setup.generation);
+    assert.equal(first.result.complete, false); assert.equal(first.result.pendingReason, "deadline"); assert.equal(first.result.progress.listsTotal, 2);
+    assert.equal(first.result.source, "direct-cloudkit-query"); assert.deepEqual(first.result.records.map(item => item.id), ["Reminder/A1"]);
+    const token = first.result.continuation!;
+    // Another complete retrieval removes A from the dashboard snapshot, but
+    // cannot skip its outstanding all-open page or change this operation's lists.
+    replies.push({ body: { records: [list("List/NEW")] } }); await service().getCurrentLists(setup.generation);
+    assert.equal((await repository.load()).session.savedLists?.[0].id, "List/NEW");
+    const beforeResume = requests.length;
+    replies.push({ body: { records: [reminder("Reminder/A2", "List/A")] } }, { body: { records: [] } });
+    const resumed = await service().readAllOpenForMCP(setup.generation, token);
+    assert.equal(resumed.result.complete, true); assert.deepEqual(resumed.result.records.map(item => item.id), ["Reminder/A2"]);
+    assert.deepEqual(resumed.result.lists.map(item => item.id), ["List/A", "List/EMPTY"]);
+    assert.equal(requests[beforeResume].continuationMarker, "a-next");
+    assert.ok(requests.slice(beforeResume).every(body => (body.query as { recordType: string }).recordType === "reminderList"));
+    const beforeReplay = requests.length;
+    await assert.rejects(service().readAllOpenForMCP(setup.generation, token), (e: unknown) => e instanceof AppError && e.code === "CONFLICT"); assert.equal(requests.length, beforeReplay);
+    // Switching to legacy uses its recovery collection, never the direct snapshot.
+    const current = await repository.load(), fence = await repository.claimRead(current.fence.generation, current.fence.version);
+    await repository.commitResume(fence, { ...current.session, legacySavedLists: mergeSavedLists([], [{ id: "List/LEGACY", title: "Legacy" }], true), catalogueSync: { token: "legacy-head", pending: false, initialComplete: true, pages: 1, seen: [], updatedAt: now } }, "READY");
+    replies.push({ body: { zones: [{ zoneID: { zoneName: "Reminders" }, records: [], moreComing: false, syncToken: "legacy-head" }] } }, { body: { records: [reminder("Reminder/LEGACY", "List/LEGACY")] } });
+    const legacy = await new AppleConnectionService({ ...env, REMINDERS_LIST_DISCOVERY: "legacy" }, owner).readAllOpenForMCP(setup.generation);
+    assert.equal(legacy.result.complete, true); assert.deepEqual(legacy.result.records.map(item => item.id), ["Reminder/LEGACY"]);
+    replies.push({ body: { records: [list("List/A")] } }, { body: { records: [], continuationMarker: "other-next" }, after: () => { now += 20_000; } });
+    const pending = await service().readAllOpenForMCP(setup.generation);
+    await repository.disconnect(); const nextSetup = await repository.begin((await repository.status()).generation); await repository.commit(nextSetup, appleSession(), "READY");
+    await assert.rejects(service().readAllOpenForMCP(nextSetup.generation, pending.result.continuation), (e: unknown) => e instanceof AppError && e.code === "CONFLICT");
+    assert.equal((await repository.load()).session.allOpenScan, undefined); assert.equal(replies.length, 0);
   } finally { globalThis.fetch = originalFetch; Date.now = originalNow; db.sqlite.close(); }
 });

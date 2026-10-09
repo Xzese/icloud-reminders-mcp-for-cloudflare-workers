@@ -102,14 +102,14 @@ try {
     { recordName: "Alarm/SYNTHETIC", recordType: "Alarm", fields: {} },
     { recordName: "List/SYNTHETIC", recordType: "List", fields: { ReminderIDs: { type: "STRING", value: JSON.stringify(Array(2001).fill("Reminder/SYNTHETIC")) } } },
   ] });
-  ck.intercept({ path: /\/database\/1\/com\.apple\.reminders\/production\/private\/records\/lookup\?/, method: "POST" }).reply(200, { records: [{ recordName: "List/SYNTHETIC", recordType: "List", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, fields: { Name: { type: "STRING", value: "Synthetic test list" } } }, { recordName: "List/MISSING", serverErrorCode: "NOT_FOUND" }] });
-  ck.intercept({ path: /\/database\/1\/com\.apple\.reminders\/production\/private\/records\/lookup\?/, method: "POST" }).reply(200, { records: [{ recordName: "List/SYNTHETIC", recordType: "List", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, fields: { Name: { type: "STRING", value: "Renamed saved list" } } }, { recordName: "List/MISSING", recordType: "List", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, fields: { Name: { type: "STRING", value: "Restored saved list" } } }] });
   ck.intercept({ path: /\/database\/1\/com\.apple\.reminders\/production\/private\/zones\/list\?/, method: "POST" }).reply(200, { zones: [{ zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: "synthetic-private-owner" } }] });
   ck.intercept({ path: /\/database\/1\/com\.apple\.reminders\/production\/private\/changes\/zone\?/, method: "POST" }).reply(200, { zones: [{ zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, syncToken: "synthetic-empty-checkpoint", moreComing: true, records: [] }] });
   ck.intercept({ path: /\/database\/1\/com\.apple\.reminders\/production\/private\/changes\/zone\?/, method: "POST" }).reply(200, { zones: [{ zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: "synthetic-private-owner" }, syncToken: "synthetic-catalogue-checkpoint", moreComing: null, records: [{ recordName: "List/SYNTHETIC", recordType: "List", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, fields: { Name: { type: "STRING", value: "Synthetic test list" } } }] }] });
   ck.intercept({ path: /\/database\/1\/com\.apple\.reminders\/production\/private\/zones\/list\?/, method: "POST", headers: { origin: "https://www.icloud.com" } }).reply(421, {});
   let syncScenario = null;
   let mcpReminderScenario = null;
+  let directMcpScenario = null;
+  let controlledReadLookups = [];
   let allOpenScenario = null;
   let catalogueRequestCount = 0;
   let batchScenario = null;
@@ -131,18 +131,63 @@ try {
     { recordName: `Alarm/${listId.slice(5)}`, recordType: "Alarm", fields: {} },
   ], continuationMarker: `first-page-${listId.slice(5)}` }), { headers: { "content-type": "application/json", ...headers } });
   const enabledOptions = { ...options, bindings: { ...options.bindings, LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2", CATALOGUE_BACKGROUND_RUNNER: "cron" }, outboundService: async req => {
+    const pathname = new URL(req.url).pathname;
+    if (directMcpScenario) {
+      directMcpScenario.paths[pathname] = (directMcpScenario.paths[pathname] ?? 0) + 1;
+      if (pathname.endsWith("/zones/list")) return new Response(JSON.stringify({ zones: [{ zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: "synthetic-private-owner" } }] }), { headers: { "content-type": "application/json" } });
+      if (pathname.endsWith("/records/lookup")) {
+        const body = await req.clone().json();
+        assert.deepEqual(body.desiredKeys, ["Name", "Color", "Count", "IsGroup", "Deleted"]);
+        assert.deepEqual(body.records, [{ recordName: "List/KNOWN" }]);
+        assert.equal(body.zoneID.ownerRecordName, "synthetic-private-owner");
+        return new Response(JSON.stringify({ records: [directMcpScenario.knownList] }), { headers: { "content-type": "application/json" } });
+      }
+      if (pathname.endsWith("/records/query")) {
+        const body = await req.clone().json();
+        if (body.query.recordType === "Lists") {
+          directMcpScenario.listQueries++;
+          assert.equal(body.resultsLimit, 200);
+          const discovery = directMcpScenario.listDiscoveries[directMcpScenario.listDiscoveryRequests++];
+          assert.ok(discovery, "Unexpected direct Lists query");
+          assert.equal(body.continuationMarker, discovery.inputCursor);
+          return new Response(JSON.stringify(discovery.reply), { headers: { "content-type": "application/json" } });
+        }
+        assert.equal(body.query.recordType, "reminderList");
+        assert.equal(body.resultsLimit, 200);
+        const listId = body.query.filterBy.find(filter => filter.fieldName === "List").fieldValue.value.recordName;
+        assert.equal(body.query.filterBy.find(filter => filter.fieldName === "includeCompleted").fieldValue.value, 0);
+        const reply = directMcpScenario.reminderPages[listId].shift();
+        assert.ok(reply, `Unexpected direct all-open query for ${listId}`);
+        return reply instanceof Response ? reply : new Response(JSON.stringify(reply), { headers: { "content-type": "application/json" } });
+      }
+      assert.ok(false, `Unexpected direct-mode CloudKit request: ${pathname}`);
+    }
     if (syncScenario && ["/changes/zone", "/records/lookup"].some(path => new URL(req.url).pathname.endsWith(path))) {
       const body = await req.clone().json();
       syncScenario.requests.push(body);
       if (new URL(req.url).pathname.endsWith("/changes/zone")) {
+        syncScenario.changeRequests.push(body);
         const next = syncScenario.pages.shift(); assert.ok(next, "Unexpected sync page");
         assert.equal(body.resultsLimit, 200); assert.equal(body.zones[0].reverse, undefined);
         assert.deepEqual(body.zones[0].desiredRecordTypes, ["List", "Reminder"]);
         assert.equal(body.zones[0].syncToken, next.requestToken);
         return new Response(JSON.stringify({ zones: [{ zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, ...next.response }] }), { headers: { "content-type": "application/json" } });
       }
+      syncScenario.lookupRequests.push(body);
       assert.deepEqual(body.desiredKeys, ["Name", "Color", "Count", "IsGroup", "Deleted"]);
       return new Response(JSON.stringify({ records: body.records.map(({ recordName }) => syncScenario.current[recordName]) }), { headers: { "content-type": "application/json" } });
+    }
+    if (pathname.endsWith("/records/lookup")) {
+      const body = await req.clone().json(); controlledReadLookups.push(body);
+      const ids = body.records.map(({ recordName }) => recordName);
+      assert.deepEqual(body.desiredKeys, ["Name", "Color", "Count", "IsGroup", "Deleted"]);
+      const list = (id, title) => ({ recordName: id, recordType: "List", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, fields: { Name: { type: "STRING", value: title }, Count: { type: "INT64", value: 0 }, IsGroup: { type: "INT64", value: 0 }, Deleted: { type: "INT64", value: 0 } } });
+      if (ids.join(",") === "List/SYNTHETIC,List/MISSING") {
+        const refresh = controlledReadLookups.filter(item => item.records.map(record => record.recordName).join(",") === ids.join(",")).length > 1;
+        return new Response(JSON.stringify({ records: [list("List/SYNTHETIC", refresh ? "Renamed saved list" : "Synthetic test list"), ...(refresh ? [list("List/MISSING", "Restored saved list")] : [{ recordName: "List/MISSING", serverErrorCode: "NOT_FOUND" }])] }), { headers: { "content-type": "application/json" } });
+      }
+      assert.ok(ids.every(id => ["List/SYNTHETIC", "List/BATCH-A", "List/BATCH-B"].includes(id)), `Unexpected controlled lookup: ${ids.join(",")}`);
+      return new Response(JSON.stringify({ records: ids.map(id => list(id, id === "List/SYNTHETIC" ? "Synthetic test list" : `Test ${id.slice(5)}`)) }), { headers: { "content-type": "application/json" } });
     }
     if (allOpenScenario && new URL(req.url).pathname.endsWith("/records/query")) {
       const body = await req.clone().json(); allOpenScenario.requests.push(body);
@@ -267,6 +312,7 @@ try {
   assert.equal(sharedValue.result.contentsReturned, false); assert.equal(sharedValue.writesEnabled, false);
   const compoundResponse = await request("/api/apple/read", { method: "POST", body: { action: "reminders", expectedGeneration: empty.generation, listId: "List/SYNTHETIC", includeCompleted: true, limit: 1 } });
   const compound = await compoundResponse.json(); assert.equal(compoundResponse.status, 200, JSON.stringify(compound)); assert.equal(compound.result.records.length, 1); assert.equal(compound.result.auxiliaryRecordCounts.Alarm, 1); assert.equal(compound.result.auxiliaryRecordCounts.List, 1); assert.equal(compound.result.auxiliaryDetailsIncluded, true); assert.equal(compound.liveReadValidated, false);
+  assert.deepEqual(controlledReadLookups.at(-1).records, [{ recordName: "List/SYNTHETIC" }], "A controlled single-list reminder read authorizes the list before querying reminders.");
   assert.equal(compoundResponse.headers.get("cache-control"), "private, no-store");
   assert.equal(compound.result.records[0].appleRecord.fields.List.value.recordName, "List/SYNTHETIC");
   assert.equal(compound.result.relatedRecords.length, 2); assert.equal(compound.result.relatedRecords[0].recordType, "Alarm");
@@ -290,7 +336,8 @@ try {
     assert.equal(page.auxiliaryRecordCounts.Alarm, 1); assert.equal(page.relatedRecords.length, 1);
     assert.equal(page.continuation, `first-page-${page.listId.slice(5)}`); assert.equal(page.paginationComplete, false);
   }
-  assert.equal(batchValue.result.requestTrace.length, 2); assert.equal(concurrentBatch.arrivals.length, 2);
+  assert.equal(batchValue.result.requestTrace.length, 3); assert.equal(batchValue.result.requestTrace.filter(entry => entry.path.endsWith("/records/lookup")).length, 1); assert.equal(concurrentBatch.arrivals.length, 2);
+  assert.deepEqual(controlledReadLookups.at(-1).records, [{ recordName: "List/BATCH-A" }, { recordName: "List/BATCH-B" }], "A controlled batch authorizes every list before starting its reminder queries.");
   const batchDB = await worker.getD1Database("DB");
   const batchContext = { ownerId: owner, accountId: "apple-reminders", generation: empty.generation, recordId: "apple-session", schemaVersion: 1 };
   const batchEnvelope = new Envelopes("synthetic", { synthetic: secret });
@@ -313,7 +360,7 @@ try {
   assert.equal((await request("/api/apple/read", { method: "POST", body: { action: "saved-lists", expectedGeneration: empty.generation } })).status, 200);
   // Server-held forward checkpoints survive a cold restart and switch to deltas.
   const currentList = (id, title) => ({ recordName: id, recordType: "List", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, fields: { Name: { type: "STRING", value: title } } });
-  syncScenario = { requests: [], current: { "List/NEW": currentList("List/NEW", "Initial current name") }, pages: [
+  syncScenario = { requests: [], changeRequests: [], lookupRequests: [], current: { "List/NEW": currentList("List/NEW", "Initial current name") }, pages: [
     { requestToken: undefined, response: { records: [currentList("List/NEW", "Old history name")], syncToken: "sync-initial-next", moreComing: true } },
     { requestToken: "sync-initial-next", response: { records: [], syncToken: "sync-head", moreComing: false } },
   ] };
@@ -340,7 +387,7 @@ try {
   await worker.dispose(); worker = new Miniflare(withScheduler(enabledOptions));
   const restoreSync = await (await request("/api/apple/read", { method: "POST", body: { action: "saved-lists", expectedGeneration: empty.generation } })).json();
   assert.equal(restoreSync.result.catalogueSync.phase, "initial"); assert.equal(restoreSync.result.catalogueSync.pages, 1);
-  assert.equal(syncScenario.requests.length, 2); assert.ok(!JSON.stringify(restoreSync).includes("sync-initial-next"));
+  assert.equal(syncScenario.changeRequests.length, 1); assert.equal(syncScenario.lookupRequests.length, 1); assert.ok(!JSON.stringify(restoreSync).includes("sync-initial-next"));
   const initialResume = await request("/api/apple/read", { method: "POST", body: { action: "catalogue-auto", expectedGeneration: empty.generation, enabled: true } }); assert.equal(initialResume.status, 200);
   await scheduledTick();
   const terminalSyncResponse = await request("/api/apple/read", { method: "POST", body: { action: "saved-lists", expectedGeneration: empty.generation } });
@@ -365,13 +412,15 @@ try {
   assert.equal(mcpLists.result.structuredContent.catalogueSync.initialPages, 2); assert.equal(mcpLists.result.structuredContent.catalogueSync.totalPages, 5);
   const openReminder = { recordName: "Reminder/OPEN", recordType: "Reminder", fields: { List: { type: "REFERENCE", value: { recordName: "List/NEW", action: "VALIDATE" } }, Completed: { type: "INT64", value: 0 } } };
   mcpReminderScenario = { requests: [], records: [openReminder] };
-  syncScenario.pages.push({ requestToken: "sync-new-head", response: { records: [], syncToken: "sync-new-head", moreComing: false } });
+  const beforeKnownReadChanges = syncScenario.changeRequests.length;
+  const beforeKnownReadLookups = syncScenario.lookupRequests.length;
   const firstOpenRead = await mcp("tools/call", { name: "get_reminders", arguments: { listId: "List/NEW" } });
   assert.ok(!firstOpenRead.result.isError, JSON.stringify(firstOpenRead)); assert.equal(firstOpenRead.result.structuredContent.records[0].id, "Reminder/OPEN");
   assert.equal(firstOpenRead.result.structuredContent.records[0].completed, false); assert.ok(!JSON.stringify(firstOpenRead).includes("appleRecord"));
+  assert.equal(syncScenario.changeRequests.length, beforeKnownReadChanges, "A known-list MCP read does not consume a catalogue checkpoint page.");
+  assert.equal(syncScenario.lookupRequests.length, beforeKnownReadLookups + 1, "A known-list MCP read verifies its list through records/lookup.");
   // Completing the previously returned item produces a Reminder change. The
   // current includeCompleted=0 query now excludes it; cached rows are not reused.
-  syncScenario.pages.push({ requestToken: "sync-new-head", response: { records: [{ ...openReminder, fields: { ...openReminder.fields, Completed: { type: "INT64", value: 1 } } }], syncToken: "sync-completed-head", moreComing: false } });
   mcpReminderScenario.records = [];
   const completedOpenRead = await mcp("tools/call", { name: "get_reminders", arguments: { listId: "List/NEW" } });
   assert.ok(!completedOpenRead.result.isError, JSON.stringify(completedOpenRead)); assert.equal(completedOpenRead.result.structuredContent.records.length, 0);
@@ -381,7 +430,7 @@ try {
   // One real MCP call reads every available list and each current query page.
   const allReminder = (id, listId, completed = 0) => ({ recordName: id, recordType: "Reminder", fields: { List: { type: "REFERENCE", value: { recordName: listId, action: "VALIDATE" } }, Completed: { type: "INT64", value: completed } } });
   syncScenario.current = { ...syncScenario.current, "List/ALL-A": currentList("List/ALL-A", "All list A"), "List/ALL-B": currentList("List/ALL-B", "All list B"), "List/MISSING": { recordName: "List/MISSING", serverErrorCode: "NOT_FOUND" } };
-  syncScenario.pages.push({ requestToken: "sync-completed-head", response: { records: [currentList("List/ALL-A", "All list A"), currentList("List/ALL-B", "All list B"), { recordName: "List/MISSING", deleted: true }], syncToken: "sync-all-head", moreComing: false } });
+  syncScenario.pages.push({ requestToken: "sync-new-head", response: { records: [currentList("List/ALL-A", "All list A"), currentList("List/ALL-B", "All list B"), { recordName: "List/MISSING", deleted: true }], syncToken: "sync-all-head", moreComing: false } });
   allOpenScenario = { requests: [], pages: {
     "List/NEW": [{ reply: { records: [] } }],
     "List/ALL-A": [{ reply: { records: [allReminder("Reminder/A1", "List/ALL-A")], continuationMarker: "all-a-next" } }, { inputCursor: "all-a-next", reply: { records: [allReminder("Reminder/A2", "List/ALL-A"), allReminder("Reminder/CLOSED", "List/ALL-A", 1), { ...allReminder("Reminder/DELETED", "List/ALL-A"), deleted: true }] } }],
@@ -401,6 +450,13 @@ try {
   syncScenario.pages.push({ requestToken: "sync-all-head", response: { serverErrorCode: "CHANGE_TOKEN_EXPIRED" } });
   const expiredToken = await request("/api/apple/read", { method: "POST", body: syncBody }); assert.equal((await expiredToken.json()).error.code, "RESTART_REQUIRED");
   assert.equal((await currentSyncDB.prepare("SELECT envelope FROM apple_session_state WHERE owner_id = ?").bind(owner).first()).envelope, beforeExpiredToken);
+  mcpReminderScenario = { requests: [], records: [openReminder] };
+  const changesAfterExpiredCheckpoint = syncScenario.changeRequests.length;
+  const knownReadWithExpiredCheckpoint = await mcp("tools/call", { name: "get_reminders", arguments: { listId: "List/NEW" } });
+  assert.ok(!knownReadWithExpiredCheckpoint.result.isError, JSON.stringify(knownReadWithExpiredCheckpoint));
+  assert.equal(knownReadWithExpiredCheckpoint.result.structuredContent.records[0].id, "Reminder/OPEN");
+  assert.equal(syncScenario.changeRequests.length, changesAfterExpiredCheckpoint, "Known-list reads work without retrying an expired catalogue checkpoint.");
+  mcpReminderScenario = null;
   syncScenario.pages.push({ requestToken: undefined, response: { records: [], syncToken: "sync-restarted-head", moreComing: false } });
   const resetSync = await request("/api/apple/read", { method: "POST", body: { ...syncBody, restart: true } }); assert.equal(resetSync.status, 200, await resetSync.clone().text());
   const finalSyncCache = await (await request("/api/apple/read", { method: "POST", body: { action: "saved-lists", expectedGeneration: empty.generation } })).json();
@@ -430,7 +486,80 @@ try {
   await request("/api/auth/disconnect", { method: "POST", body: {} });
   assert.equal((await request("/api/apple/read", { method: "POST", body: { action: "discover", expectedGeneration: empty.generation } })).status, 409);
   fetchMock.assertNoPendingInterceptors();
-  console.log(JSON.stringify({ result: "passed", runtime: "local-workerd", productionBundle: true, checks: ["owner-denial", "origin-CSRF", "removed-feasibility-surfaces", "stateless-MCP", "nonce-CSP", "gated-auth-no-state", "unverified-Apple-success-rejected", "dedicated-credential-document", "encrypted-session-cold-start", "restored-cookie-compound-read", "two-list-concurrent-read", "incremental-catalogue-cold-restart", "expired-catalogue-token", "scheduled-catalogue-without-browser", "background-initial-scan-pause-resume", "on-demand-MCP-catch-up", "all-open-reminders-across-three-lists", "completion-removes-open-reminder", "persistent-catalogue-page-counts", "failed-batch-drains-lease", "batch-auth-invalidation", "disconnect-rejects-read"], liveAppleValidated: false }));
+  await worker.dispose();
+  const directOptions = { ...enabledOptions, bindings: { ...enabledOptions.bindings, REMINDERS_LIST_DISCOVERY: "direct" } };
+  worker = new Miniflare(withScheduler(directOptions));
+  const directDB = await worker.getD1Database("DB");
+  await directDB.prepare("INSERT OR IGNORE INTO apple_session_state (owner_id, account_id) VALUES (?, 'apple-reminders')").bind(owner).run();
+  const directStatus = await (await request("/api/connection")).json();
+  const directGeneration = directStatus.generation;
+  const expiredCatalogueSession = { ...fixtureSession, catalogueSync: { token: "synthetic-expired-checkpoint", initialComplete: true, pending: false, pages: 8, seen: [], updatedAt: Date.now(), initialPages: 8, totalPages: 8, totalPagesKnown: true, lastPassPages: 8 } };
+  const directEnvelope = await new Envelopes("synthetic", { synthetic: secret }).encrypt(expiredCatalogueSession, { ownerId: owner, accountId: "apple-reminders", generation: directGeneration, recordId: "apple-session", schemaVersion: 1 });
+  await directDB.prepare("UPDATE apple_session_state SET state = 'READY', envelope = ?, action = NULL, next_attempt_at = 0, transaction_id = NULL, transaction_expires_at = NULL, resume_id = NULL, resume_expires_at = NULL, version = version + 1 WHERE owner_id = ? AND account_id = 'apple-reminders'").bind(JSON.stringify(directEnvelope), owner).run();
+  const directListRecord = (id, title, { count = 0, isGroup = false, deleted = false } = {}) => ({ recordName: id, recordType: "List", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, ...(deleted ? { deleted: false } : {}), fields: { Name: { type: "STRING", value: title }, Count: { type: "INT64", value: count }, IsGroup: { type: "INT64", value: isGroup ? 1 : 0 }, Deleted: { type: "INT64", value: deleted ? 1 : 0 } } });
+  const directReminder = (id, listId) => ({ recordName: id, recordType: "Reminder", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" }, fields: { List: { type: "REFERENCE", value: { recordName: listId, action: "VALIDATE", zoneID: { zoneName: "Reminders", ownerRecordName: "synthetic-private-owner" } } }, Completed: { type: "INT64", value: 0 } } });
+  const pageOne = [directListRecord("List/EMPTY", "Empty list"), directListRecord("List/GROUP", "Group", { isGroup: true })];
+  const pageTwo = [directListRecord("List/ACTIVE", "Active list", { count: 1 }), directListRecord("List/DELETED", "Deleted list", { deleted: true })];
+  directMcpScenario = {
+    paths: {}, listDiscoveryRequests: 0, listQueries: 0, knownList: directListRecord("List/KNOWN", "Known list"),
+    listDiscoveries: [
+      { reply: { records: pageOne, continuationMarker: "direct-list-next" } },
+      { inputCursor: "direct-list-next", reply: { records: pageTwo } },
+      { reply: { records: pageOne, continuationMarker: "direct-list-next" } },
+      { inputCursor: "direct-list-next", reply: { records: pageTwo } },
+    ],
+    reminderPages: {
+      "List/KNOWN": [{ records: [directReminder("Reminder/KNOWN", "List/KNOWN")] }],
+      "List/EMPTY": [new Response("{}", { status: 503 }), { records: [] }],
+      "List/ACTIVE": [{ records: [directReminder("Reminder/ACTIVE", "List/ACTIVE")] }],
+    },
+  };
+  const measuredMcp = async (name, call) => {
+    const before = { ...directMcpScenario.paths };
+    const started = performance.now();
+    const value = await call();
+    const elapsedMs = Number((performance.now() - started).toFixed(3));
+    const pathCounts = Object.fromEntries(Object.keys(directMcpScenario.paths).map(path => [path, directMcpScenario.paths[path] - (before[path] ?? 0)]).filter(([, count]) => count > 0));
+    return { name, elapsedMs, pathCounts, value };
+  };
+  const knownMetric = await measuredMcp("known-list read with stale checkpoint", () => mcp("tools/call", { name: "get_reminders", arguments: { expectedGeneration: directGeneration, listId: "List/KNOWN" } }));
+  assert.ok(!knownMetric.value.result.isError, JSON.stringify(knownMetric.value));
+  assert.equal(knownMetric.value.result.structuredContent.source, "direct-known-list-query");
+  assert.deepEqual(knownMetric.pathCounts, { "/database/1/com.apple.reminders/production/private/zones/list": 1, "/database/1/com.apple.reminders/production/private/records/lookup": 1, "/database/1/com.apple.reminders/production/private/records/query": 1 });
+  assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/changes/zone"] ?? 0, 0, "A known-list read ignores an expired saved catalogue checkpoint.");
+  const directListsMetric = await measuredMcp("direct selectable-list retrieval", () => mcp("tools/call", { name: "get_reminder_lists", arguments: { expectedGeneration: directGeneration } }));
+  assert.ok(!directListsMetric.value.result.isError, JSON.stringify(directListsMetric.value));
+  assert.equal(directListsMetric.value.result.structuredContent.source, "direct-cloudkit-query");
+  assert.equal(directListsMetric.value.result.structuredContent.freshness.mode, "live");
+  assert.deepEqual(directListsMetric.value.result.structuredContent.records.map(record => record.id).sort(), ["List/ACTIVE", "List/EMPTY"]);
+  assert.equal(directMcpScenario.listQueries, 2);
+  const persistedDirectEnvelope = await directDB.prepare("SELECT envelope FROM apple_session_state WHERE owner_id = ? AND account_id = 'apple-reminders'").bind(owner).first();
+  const persistedDirectSession = await new Envelopes("synthetic", { synthetic: secret }).decrypt(JSON.parse(persistedDirectEnvelope.envelope), { ownerId: owner, accountId: "apple-reminders", generation: directGeneration, recordId: "apple-session", schemaVersion: 1 });
+  assert.deepEqual(persistedDirectSession.savedLists.map(list => list.id).sort(), ["List/ACTIVE", "List/DELETED", "List/EMPTY", "List/GROUP"], "A complete direct query persists the full snapshot, including nonselectable summaries.");
+  assert.equal(persistedDirectSession.savedLists.find(list => list.id === "List/DELETED").deleted, true, "The logical Deleted field takes effect when CloudKit's top-level deleted marker is false.");
+  assert.equal(persistedDirectSession.directListSnapshot.updatedAt > 0, true);
+  assert.equal(persistedDirectSession.catalogueSync.token, "synthetic-expired-checkpoint", "Direct discovery preserves the separate legacy checkpoint.");
+  assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/zones/list"], 1, "The private-zone owner is bootstrapped once and then reused.");
+  const directOpenInitialMetric = await measuredMcp("direct all-open initial discovery", () => mcp("tools/call", { name: "get_all_open_reminders", arguments: { expectedGeneration: directGeneration } }));
+  const directOpenInitial = directOpenInitialMetric.value.result.structuredContent;
+  assert.ok(!directOpenInitialMetric.value.result.isError, JSON.stringify(directOpenInitialMetric.value));
+  assert.equal(directOpenInitial.complete, false); assert.equal(directOpenInitial.errors[0].code, "UPSTREAM_UNAVAILABLE");
+  assert.deepEqual(directOpenInitial.progress, { listsTotal: 2, listsCompleted: 0, pagesRead: 0, totalPages: 0 });
+  const listQueriesAfterInitial = directMcpScenario.listQueries;
+  assert.equal(listQueriesAfterInitial, 4, "Initial all-open discovery follows both bounded Lists pages exactly once.");
+  assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/zones/list"], 1);
+  const directOpenResumeMetric = await measuredMcp("direct all-open resume", () => mcp("tools/call", { name: "get_all_open_reminders", arguments: { expectedGeneration: directGeneration, continuation: directOpenInitial.continuation } }));
+  const directOpenResume = directOpenResumeMetric.value.result.structuredContent;
+  assert.ok(!directOpenResumeMetric.value.result.isError, JSON.stringify(directOpenResumeMetric.value));
+  assert.equal(directOpenResume.complete, true); assert.equal(directOpenResume.source, "direct-cloudkit-query");
+  assert.equal(directOpenResume.freshness.mode, "live"); assert.equal(directOpenResume.progress.listsTotal, 2); assert.equal(directOpenResume.progress.listsCompleted, 2);
+  assert.deepEqual(directOpenResume.lists.map(list => list.id), ["List/EMPTY", "List/ACTIVE"]);
+  assert.deepEqual(directOpenResume.records.map(record => record.id), ["Reminder/ACTIVE"]);
+  assert.equal(directMcpScenario.listQueries, listQueriesAfterInitial, "A continuation resumes the saved list selection without rediscovering Lists.");
+  assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/changes/zone"] ?? 0, 0);
+  assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/zones/list"], 1);
+  console.log(JSON.stringify({ type: "synthetic-performance", liveAppleData: false, measurements: [knownMetric, directListsMetric, directOpenInitialMetric, directOpenResumeMetric].map(({ name, elapsedMs, pathCounts }) => ({ name, elapsedMs, pathCounts })) }));
+  console.log(JSON.stringify({ result: "passed", runtime: "local-workerd", productionBundle: true, checks: ["owner-denial", "origin-CSRF", "removed-feasibility-surfaces", "stateless-MCP", "nonce-CSP", "gated-auth-no-state", "unverified-Apple-success-rejected", "dedicated-credential-document", "encrypted-session-cold-start", "restored-cookie-compound-read", "single-and-batch-list-authorization", "two-list-concurrent-read", "incremental-catalogue-cold-restart", "known-list-read-without-catalogue-page", "known-list-read-with-expired-checkpoint", "expired-catalogue-token", "scheduled-catalogue-without-browser", "background-initial-scan-pause-resume", "on-demand-MCP-catch-up", "legacy-all-open-reminders-across-three-lists", "direct-list-query-pagination-and-filtering", "direct-all-open-resume-without-rediscovery", "completion-removes-open-reminder", "persistent-catalogue-page-counts", "failed-batch-drains-lease", "batch-auth-invalidation", "disconnect-rejects-read"], liveAppleValidated: false }));
 } finally {
   if (worker) await worker.dispose(); await rm(directory, { recursive: true, force: true });
 }

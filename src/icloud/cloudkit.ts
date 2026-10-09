@@ -12,6 +12,10 @@ const MAX_RECORD_NAME_LENGTH = 512;
 const MAX_TOKEN_LENGTH = 8192;
 const MAX_REQUEST_BYTES = 65_536;
 const MAX_RESPONSE_BYTES = 1_048_576;
+const MAX_ALL_LIST_PAGES = 25;
+const MAX_ALL_LIST_DURATION_MS = 20_000;
+const MAX_ALL_LIST_SUMMARY_BYTES = MAX_RESPONSE_BYTES - 4_096;
+const MAX_ALL_LIST_IDS = 1_000;
 const RECORD_TYPES = new Set(["List", "Reminder", "Alarm", "AlarmTrigger", "Attachment", "Hashtag", "RecurrenceRule"]);
 const LIST_SUMMARY_KEYS = ["Name", "Color", "Count", "IsGroup", "Deleted"];
 export interface CloudKitReadTrace { path: string; url: string; request: Record<string, unknown>; response: { status: number; returnedRecords: number; recordTypes: Record<string, number>; zones: number; moreComing: (boolean | null)[]; syncTokenPresent: boolean; continuationPresent: boolean; recordErrors: number }; }
@@ -103,6 +107,15 @@ export interface RemindersList {
   deleted: boolean | null;
   reminderIds: string[] | null;
   raw: Record<string, unknown>;
+}
+
+export type RemindersListSummary = Omit<RemindersList, "raw" | "reminderIds"> & { reminderIds: null };
+
+export interface CloudKitAllListsResult {
+  lists: RemindersList[];
+  complete: boolean;
+  pagesRead: number;
+  pendingReason: "continuation_cycle" | "record_errors" | "page_limit" | "time_limit" | "summary_byte_limit" | "list_limit" | null;
 }
 
 export interface Reminder {
@@ -315,6 +328,17 @@ export function normalizeList(record: CloudKitRecord, includeMembership = true):
   };
 }
 
+function summarizeListRecord(record: CloudKitRecordItem): { list: RemindersList; summary: RemindersListSummary } {
+  if (!("recordType" in record)) {
+    const list: RemindersList = { id: record.recordName, title: null, color: null, count: null, isGroup: null, deleted: true, reminderIds: null, raw: {} };
+    return { list, summary: { id: list.id, title: null, color: null, count: null, isGroup: null, deleted: true, reminderIds: null } };
+  }
+  const normalized = normalizeList(record, false);
+  const list = { ...normalized, deleted: record.deleted === true || normalized.deleted === true ? true : normalized.deleted, raw: {} };
+  const summary: RemindersListSummary = { id: list.id, title: list.title, color: list.color, count: list.count, isGroup: list.isGroup, deleted: list.deleted, reminderIds: null };
+  return { list, summary };
+}
+
 export function normalizeReminder(record: CloudKitRecord, expectedOwner = DEFAULT_OWNER): Reminder {
   requireValue(record.recordType === "Reminder", "Only Reminders Reminder records can be normalized as reminders.");
   const id = recordName(record.recordName, ["Reminder"]);
@@ -397,7 +421,7 @@ function parseRecord(value: unknown, expectedOwner: string, allowDefaultOwner = 
   };
 }
 
-function pageRecords(value: unknown, limit: number, absoluteLimit = MAX_PAGE_SIZE, expectedOwner = DEFAULT_OWNER, changeHistory = false, allowDefaultOwner = true): { records: CloudKitRecordItem[]; recordErrors: CloudKitRecordError[] } {
+function pageRecords(value: unknown, limit: number, absoluteLimit = MAX_PAGE_SIZE, expectedOwner = DEFAULT_OWNER, changeHistory = false, allowDefaultOwner = true, allowDuplicates = false): { records: CloudKitRecordItem[]; recordErrors: CloudKitRecordError[] } {
   requireValue(Array.isArray(value), "Apple returned a malformed CloudKit records page.");
   requireValue(value.length <= limit && value.length <= absoluteLimit, "Apple returned more records than the supported page budget.");
   const records: CloudKitRecordItem[] = [];
@@ -409,7 +433,7 @@ function pageRecords(value: unknown, limit: number, absoluteLimit = MAX_PAGE_SIZ
       recordErrors.push(parsed);
       continue;
     }
-    requireValue(changeHistory || !names.has(parsed.recordName), "Apple returned a duplicate record in one page.");
+    requireValue(changeHistory || allowDuplicates || !names.has(parsed.recordName), "Apple returned a duplicate record in one page.");
     names.add(parsed.recordName);
     records.push(parsed);
   }
@@ -723,6 +747,118 @@ export class CloudKitRemindersClient {
     return page;
   }
 
+  async queryListsPage(options: { limit?: number; continuation?: string | null } = {}): Promise<CloudKitPage> {
+    return this.queryListsPageInternal(options, false);
+  }
+
+  private async queryListsPageInternal(options: { limit?: number; continuation?: string | null }, allowRepeatedContinuation: boolean): Promise<CloudKitPage> {
+    const limit = boundedLimit(options.limit);
+    const continuation = requestedToken(options.continuation, "The CloudKit continuation marker is invalid.");
+    if (this.owner === undefined) {
+      const discovery = await this.listZones();
+      requireValue(discovery.available, "Apple did not return the private Reminders zone.");
+    }
+    const payload: Record<string, unknown> = {
+      query: { recordType: "Lists" },
+      zoneID: this.requestZone,
+      resultsLimit: limit,
+    };
+    if (continuation) payload.continuationMarker = continuation;
+    const result = await this.post("/records/query", payload);
+    // This experimental endpoint uses the observed plural query type while
+    // CloudKit still returns singular List records. Membership is deliberately
+    // not projected; callers of queryAllLists receive only normalized summaries.
+    const page = this.queryResponse(result, limit, continuation, MAX_PAGE_SIZE, allowRepeatedContinuation, true);
+    requireValue(result.moreComing === undefined || result.moreComing === null || typeof result.moreComing === "boolean", "Apple returned a malformed list query pagination flag.");
+    requireValue(result.moreComing !== true || page.continuation !== null, "Apple reported more list results without a continuation marker.");
+    for (const record of page.records) {
+      const type = "recordType" in record ? record.recordType : record.recordName.slice(0, record.recordName.indexOf("/"));
+      requireValue(type === "List", "Apple returned an unrequested record type in the Reminders list query page.");
+    }
+    for (const error of page.recordErrors) if (error.recordName !== null) recordName(error.recordName, ["List"]);
+    return page;
+  }
+
+  async queryAllLists(): Promise<CloudKitAllListsResult> {
+    const startedAt = performance.now();
+    const summaries = new Map<string, { list: RemindersList; summary: RemindersListSummary }>();
+    const seenContinuations = new Set<string>();
+    let aggregateBytes = 0;
+    let pagesRead = 0;
+    let continuation: string | null = null;
+    let sawRecordErrors = false;
+    let stoppedReason: CloudKitAllListsResult["pendingReason"] = null;
+
+    if (this.owner === undefined) {
+      const discovery = await this.listZones();
+      requireValue(discovery.available, "Apple did not return the private Reminders zone.");
+    }
+
+    for (;;) {
+      if (performance.now() - startedAt >= MAX_ALL_LIST_DURATION_MS) {
+        stoppedReason = "time_limit";
+        break;
+      }
+      const page = await this.queryListsPageInternal({ limit: MAX_PAGE_SIZE, continuation }, true);
+      pagesRead++;
+      if (page.recordErrors.length > 0) {
+        const hasSessionCookie = this.http.jar.header(this.endpoint).length > 0;
+        const topLevelErrorCodes = new Set([
+          "AUTHENTICATION_REQUIRED", "NOT_AUTHENTICATED", "INVALID_AUTH_TOKEN", "AUTHENTICATION_FAILED",
+          "ACCESS_DENIED", "PERMISSION_FAILURE", "THROTTLED", "REQUEST_RATE_LIMITED", "ZONE_BUSY",
+        ]);
+        for (const error of page.recordErrors) {
+          if (topLevelErrorCodes.has(error.serverErrorCode.toUpperCase())) parseTopLevelError({ serverErrorCode: error.serverErrorCode }, { path: "/records/query", upstreamStatus: 200, hasSessionCookie });
+        }
+        sawRecordErrors = true;
+      }
+
+      for (const record of page.records) {
+        const normalized = summarizeListRecord(record);
+        const previous = summaries.get(normalized.summary.id);
+        if (previous) {
+          requireValue(JSON.stringify(previous.summary) === JSON.stringify(normalized.summary), "Apple returned conflicting duplicate Reminders list records.");
+          continue;
+        }
+        if (summaries.size >= MAX_ALL_LIST_IDS) {
+          stoppedReason = "list_limit";
+          break;
+        }
+        const bytes = new TextEncoder().encode(JSON.stringify(normalized.summary)).length;
+        if (aggregateBytes + bytes > MAX_ALL_LIST_SUMMARY_BYTES) {
+          stoppedReason = "summary_byte_limit";
+          break;
+        }
+        summaries.set(normalized.summary.id, normalized);
+        aggregateBytes += bytes;
+      }
+      if (stoppedReason) break;
+      if (performance.now() - startedAt >= MAX_ALL_LIST_DURATION_MS) {
+        stoppedReason = "time_limit";
+        break;
+      }
+      if (page.continuation === null) break;
+      if (seenContinuations.has(page.continuation)) {
+        stoppedReason = "continuation_cycle";
+        break;
+      }
+      seenContinuations.add(page.continuation);
+      if (pagesRead >= MAX_ALL_LIST_PAGES) {
+        stoppedReason = "page_limit";
+        break;
+      }
+      continuation = page.continuation;
+    }
+
+    const complete = stoppedReason === null && !sawRecordErrors;
+    return {
+      lists: [...summaries.values()].map(entry => entry.list),
+      complete,
+      pagesRead,
+      pendingReason: stoppedReason ?? (sawRecordErrors ? "record_errors" : null),
+    };
+  }
+
   async queryRemindersPage(options: { listId: string; includeCompleted: boolean; limit?: number; continuation?: string | null }): Promise<CloudKitPage> {
     requireInput(typeof options.includeCompleted === "boolean", "The completed-reminder query option must be explicit.");
     const listId = requestedRecordName(options.listId, ["List"]);
@@ -752,12 +888,12 @@ export class CloudKitRemindersClient {
     return page;
   }
 
-  private queryResponse(result: Record<string, unknown>, limit: number, requestedContinuation: string | null, absoluteLimit = MAX_PAGE_SIZE): CloudKitPage {
-    const parsed = pageRecords(result.records, limit, absoluteLimit, this.expectedOwner);
+  private queryResponse(result: Record<string, unknown>, limit: number, requestedContinuation: string | null, absoluteLimit = MAX_PAGE_SIZE, allowRepeatedContinuation = false, allowDuplicates = false): CloudKitPage {
+    const parsed = pageRecords(result.records, limit, absoluteLimit, this.expectedOwner, false, true, allowDuplicates);
     const next = optionalString(result.continuationMarker, "Apple returned a malformed query continuation marker.");
     if (next !== null) {
       validateToken(next, "Apple returned a malformed query continuation marker.");
-      requireValue(next !== requestedContinuation, "Apple repeated a query continuation marker.");
+      requireValue(allowRepeatedContinuation || next !== requestedContinuation, "Apple repeated a query continuation marker.");
     }
     const syncToken = optionalString(result.syncToken, "Apple returned a malformed query checkpoint.");
     if (syncToken !== null) validateToken(syncToken, "Apple returned a malformed query checkpoint.");
