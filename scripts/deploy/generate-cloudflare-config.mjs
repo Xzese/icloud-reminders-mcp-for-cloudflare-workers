@@ -18,7 +18,8 @@ if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(db.d
 if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(configured.name ?? "")) throw new Error("Configure a valid Worker name.");
 const output = { ...built, ...configured, main: "dist/server/index.js", assets: { ...built.assets, ...configured.assets, directory: "dist/client", binding: "ASSETS", run_worker_first: true }, d1_databases: [{ ...db }], preview_urls: false };
 if (!configured.vars) delete output.vars;
-if (process.env.REMINDERS_ENABLE_CRON === "true") output.triggers = { crons: ["* * * * *"] };
+// Retired catalogue schedules must not survive generated configurations.
+delete output.triggers;
 delete output.services;
 delete output.r2_buckets;
 await writeFile("wrangler.generated.toml", stringify(output) + "\n", { mode: 0o600 });

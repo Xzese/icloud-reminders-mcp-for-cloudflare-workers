@@ -34,79 +34,6 @@ const PcsCheckpointSchema = z.object({
   expiresAt: z.number().int().positive().safe(),
   nextAttemptAt: z.number().int().nonnegative().safe(),
 }).strict();
-const DiagnosticCatalogueSchema = z.object({
-  token: z.string().min(1).max(8192).refine(value => !/[\u0000-\u001f\u007f]/.test(value)).nullable(),
-  seen: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(100),
-  pages: z.number().int().min(0).max(100),
-  expiresAt: z.number().int().positive().safe(),
-  complete: z.boolean(),
-}).strict();
-const CatalogueSyncSchema = z.object({
-  token: z.string().min(1).max(8192).refine(value => !/[\u0000-\u001f\u007f]/.test(value)),
-  initialComplete: z.boolean(),
-  pending: z.boolean(),
-  pages: z.number().int().min(0).max(1000),
-  seen: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(1000),
-  updatedAt: z.number().int().nonnegative().safe(),
-  initialPages: z.number().int().min(0).max(1000).nullable().optional(),
-  totalPages: z.number().int().nonnegative().safe().optional(),
-  totalPagesKnown: z.boolean().optional(),
-  lastPassPages: z.number().int().min(0).max(1000).nullable().optional(),
-}).strict();
-export const CATALOGUE_AUTO_INTERVAL_MS = 3_600_000;
-const CatalogueAutoSchema = z.object({
-  policy: z.literal("initial-and-hourly").optional(),
-  enabled: z.boolean(),
-  nextCheckAt: z.number().int().nonnegative().safe().nullable(),
-  lastCheckAt: z.number().int().nonnegative().safe().nullable(),
-  lastSuccessAt: z.number().int().nonnegative().safe().nullable(),
-  lastErrorCode: z.string().max(64).regex(/^[A-Z_]+$/).nullable(),
-  pausedForError: z.boolean(),
-  failures: z.number().int().min(0).max(32),
-  runId: z.string().uuid().nullable(),
-  runUntil: z.number().int().nonnegative().safe(),
-}).strict();
-export type CatalogueAutoCheckpoint = z.infer<typeof CatalogueAutoSchema>;
-export function catalogueAutoSchedule(auto?: CatalogueAutoCheckpoint, checkpoint?: CatalogueSyncCheckpoint): CatalogueAutoCheckpoint {
-  if (!auto) {
-    const ready = checkpoint?.initialComplete && !checkpoint.pending;
-    return { policy: "initial-and-hourly", enabled: true, nextCheckAt: ready ? checkpoint.updatedAt + CATALOGUE_AUTO_INTERVAL_MS : null, lastCheckAt: ready ? checkpoint.updatedAt : null, lastSuccessAt: ready ? checkpoint.updatedAt : null, lastErrorCode: null, pausedForError: false, failures: 0, runId: null, runUntil: 0 };
-  }
-  if (auto.policy === "initial-and-hourly" || !checkpoint?.initialComplete || checkpoint.pending || auto.lastErrorCode || auto.pausedForError) return auto;
-  const anchor = auto.lastSuccessAt ?? auto.lastCheckAt ?? checkpoint.updatedAt;
-  // Preserve explicit resume dates; routine legacy five-minute dates
-  // migrate to the hourly policy without changing pending/error retry windows.
-  const legacyRoutine = auto.nextCheckAt === null || auto.nextCheckAt === anchor + 300_000;
-  return { ...auto, policy: "initial-and-hourly", nextCheckAt: !auto.enabled ? null : legacyRoutine ? anchor + CATALOGUE_AUTO_INTERVAL_MS : auto.nextCheckAt };
-}
-export function catalogueAutoMetadata(auto?: CatalogueAutoCheckpoint, checkpoint?: CatalogueSyncCheckpoint, runner?: "local" | "cron") {
-  const schedule = catalogueAutoSchedule(auto, checkpoint);
-  return {
-    enabled: schedule.enabled,
-    mode: "initial-and-hourly" as const,
-    runner: runner === "local" || runner === "cron" ? runner : "unavailable" as const,
-    intervalMs: CATALOGUE_AUTO_INTERVAL_MS,
-    nextCheckAt: schedule.nextCheckAt,
-    lastCheckAt: schedule.lastCheckAt,
-    lastSuccessAt: schedule.lastSuccessAt,
-    lastErrorCode: schedule.lastErrorCode,
-    pausedForError: schedule.pausedForError,
-  };
-}
-export type CatalogueSyncCheckpoint = z.infer<typeof CatalogueSyncSchema>;
-export function catalogueSyncMetadata(checkpoint?: CatalogueSyncCheckpoint) {
-  return {
-    phase: !checkpoint ? "not-started" as const : !checkpoint.pending ? "ready" as const : checkpoint.initialComplete ? "incremental" as const : "initial" as const,
-    pages: checkpoint?.pages ?? 0,
-    initialComplete: checkpoint?.initialComplete ?? false,
-    pending: checkpoint?.pending ?? false,
-    updatedAt: checkpoint?.updatedAt ?? null,
-    initialPages: checkpoint?.initialPages ?? (checkpoint && !checkpoint.initialComplete ? checkpoint.pages : null),
-    totalPages: checkpoint?.totalPages ?? checkpoint?.pages ?? 0,
-    totalPagesKnown: checkpoint?.totalPagesKnown ?? (!checkpoint || !checkpoint.initialComplete),
-    lastPassPages: checkpoint?.lastPassPages ?? (checkpoint && !checkpoint.pending ? checkpoint.pages : null),
-  };
-}
 export const SavedListSchema = z.object({
   id: z.string().min(6).max(512).regex(/^List\/[^/\u0000-\u0020\u007f]+$/),
   title: z.string().max(256).nullable(),
@@ -116,15 +43,12 @@ export const SavedListSchema = z.object({
 }).strict();
 const SavedListsSchema = z.array(SavedListSchema).max(1000).refine(lists => new Set(lists.map(list => list.id)).size === lists.length, "Saved list identifiers must be unique.");
 export type SavedList = z.infer<typeof SavedListSchema>;
-export function mergeSavedLists(previous: SavedList[], records: { id: string; title?: string | null; deleted?: boolean | null; isGroup?: boolean | null }[], authoritative: boolean, now = Date.now()): SavedList[] {
+export function mergeSavedLists(previous: SavedList[], records: { id: string; title?: string | null; deleted?: boolean | null; isGroup?: boolean | null }[], now = Date.now()): SavedList[] {
   const merged = new Map(previous.map(list => [list.id, list]));
   for (const record of records) {
-    // History pages are hints. Current exact lookups can rename, remove, or
-    // restore a list; older history must not replace that current evidence.
-    if (!authoritative && merged.has(record.id)) continue;
     merged.set(record.id, SavedListSchema.parse({ id: record.id, title: record.title?.slice(0, 256) ?? null, deleted: !!record.deleted, isGroup: !!record.isGroup, checkedAt: now }));
   }
-  if (merged.size > 1000) throw new AppError("UNSUPPORTED_FEATURE", "The saved list catalogue reached its 1,000-identifier limit.", 409);
+  if (merged.size > 1000) throw new AppError("UNSUPPORTED_FEATURE", "The saved list snapshot reached its 1,000-identifier limit.", 409);
   return [...merged.values()];
 }
 const AllOpenScanSchema = z.object({
@@ -137,29 +61,44 @@ const AllOpenScanSchema = z.object({
   listPages: z.number().int().min(0).max(1000),
   totalPages: z.number().int().min(0).max(10000),
   caughtUpAt: z.number().int().nonnegative().safe(),
-}).strict().refine(scan => scan.index <= scan.listIds.length, "The all-open scan list index is invalid.");
+  source: z.literal("direct-cloudkit-query"),
+  lists: SavedListsSchema,
+}).strict().refine(scan => scan.index <= scan.listIds.length, "The all-open scan list index is invalid.")
+  .refine(scan => scan.lists.length === scan.listIds.length && scan.lists.every((list, index) => list.id === scan.listIds[index] && !list.deleted && !list.isGroup), "The all-open list selection is inconsistent.");
 export type AllOpenScan = z.infer<typeof AllOpenScanSchema>;
-export const AppleSessionSchema = z.object({
+// Compatibility is limited to recognized retired fields; unknown active fields
+// still fail strict validation. No credentials, login policy or fences change.
+function discardRetiredCatalogueState(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const current = { ...value } as Record<string, unknown>;
+  for (const field of ["diagnosticCatalogue", "catalogueSync", "catalogueAuto", "legacySavedLists"]) delete current[field];
+  const scan = current.allOpenScan;
+  if (scan && typeof scan === "object" && !Array.isArray(scan)) {
+    const source = (scan as Record<string, unknown>).source;
+    // Old historical selections cannot claim to be a complete direct discovery.
+    // Retire only their continuation, preserving the valid Apple connection.
+    if (source === undefined || source === "legacy-catalogue") delete current.allOpenScan;
+  }
+  return current;
+}
+export const AppleSessionSchema = z.preprocess(discardRetiredCatalogueState, z.object({
   auth: AuthSnapshotSchema,
   connection: CloudKitConnectionSchema,
   pcs: PcsCheckpointSchema,
   login: LoginAssuranceSchema,
-  diagnosticCatalogue: DiagnosticCatalogueSchema.optional(),
-  catalogueSync: CatalogueSyncSchema.optional(),
-  catalogueAuto: CatalogueAutoSchema.optional(),
   allOpenScan: AllOpenScanSchema.optional(),
   savedLists: SavedListsSchema.optional(),
-}).strict();
+  // Optional metadata preserves version-1 encrypted list snapshots.
+  directListSnapshot: z.object({ updatedAt: z.number().int().nonnegative().safe() }).strict().optional(),
+}).strict());
 export type AppleSession = {
   auth: AuthSnapshot;
   connection: CloudKitConnection;
   pcs: PcsCheckpoint;
   login: LoginAssurance;
-  diagnosticCatalogue?: z.infer<typeof DiagnosticCatalogueSchema>;
-  catalogueSync?: CatalogueSyncCheckpoint;
-  catalogueAuto?: CatalogueAutoCheckpoint;
   allOpenScan?: AllOpenScan;
   savedLists?: SavedList[];
+  directListSnapshot?: { updatedAt: number };
 };
 export type ApprovalAction = typeof APPROVAL_ACTIONS[number];
 export type AppleSessionState = "READY" | "DEVICE_APPROVAL_PENDING";
@@ -278,7 +217,6 @@ export class AppleSessionRepository {
     const parsed = AppleSessionSchema.safeParse(session);
     if (!parsed.success) throw new AppError("VALIDATION_ERROR", "The Apple session snapshot is invalid or contains unsupported fields.", 400);
     requireCurrentLogin(parsed.data.login);
-    delete parsed.data.diagnosticCatalogue;
     return parsed.data;
   }
 

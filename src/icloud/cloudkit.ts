@@ -12,9 +12,13 @@ const MAX_RECORD_NAME_LENGTH = 512;
 const MAX_TOKEN_LENGTH = 8192;
 const MAX_REQUEST_BYTES = 65_536;
 const MAX_RESPONSE_BYTES = 1_048_576;
+const MAX_ALL_LIST_PAGES = 25;
+const MAX_ALL_LIST_DURATION_MS = 20_000;
+const MAX_ALL_LIST_SUMMARY_BYTES = MAX_RESPONSE_BYTES - 4_096;
+const MAX_ALL_LIST_IDS = 1_000;
 const RECORD_TYPES = new Set(["List", "Reminder", "Alarm", "AlarmTrigger", "Attachment", "Hashtag", "RecurrenceRule"]);
 const LIST_SUMMARY_KEYS = ["Name", "Color", "Count", "IsGroup", "Deleted"];
-export interface CloudKitReadTrace { path: string; url: string; request: Record<string, unknown>; response: { status: number; returnedRecords: number; recordTypes: Record<string, number>; zones: number; moreComing: (boolean | null)[]; syncTokenPresent: boolean; continuationPresent: boolean; recordErrors: number }; }
+export interface CloudKitReadTrace { path: string; url: string; request: Record<string, unknown>; response: { status: number; returnedRecords: number; recordTypes: Record<string, number>; zones: number; continuationPresent: boolean; recordErrors: number }; }
 
 function requireValue(condition: unknown, message: string): asserts condition {
   if (!condition) throw new AppError("PROTOCOL_CHANGED", message);
@@ -67,16 +71,12 @@ export interface CloudKitPage<T extends CloudKitRecordItem = CloudKitRecordItem>
   paginationComplete: boolean;
   complete: boolean;
   continuation: string | null;
-  syncToken: string | null;
-  moreComing?: boolean | null;
-  pendingReason: "continuation" | "more_coming" | "unknown_more_coming" | "record_errors" | null;
+  pendingReason: "continuation" | "record_errors" | null;
 }
 
 export interface CloudKitZone {
   zoneID: CloudKitZoneID;
-  syncToken: string | null;
   deleted: boolean;
-  raw: Record<string, unknown>;
 }
 
 export interface CloudKitZoneDiscovery {
@@ -103,6 +103,15 @@ export interface RemindersList {
   deleted: boolean | null;
   reminderIds: string[] | null;
   raw: Record<string, unknown>;
+}
+
+export type RemindersListSummary = Omit<RemindersList, "raw" | "reminderIds"> & { reminderIds: null };
+
+export interface CloudKitAllListsResult {
+  lists: RemindersList[];
+  complete: boolean;
+  pagesRead: number;
+  pendingReason: "continuation_cycle" | "record_errors" | "page_limit" | "time_limit" | "summary_byte_limit" | "list_limit" | null;
 }
 
 export interface Reminder {
@@ -315,6 +324,17 @@ export function normalizeList(record: CloudKitRecord, includeMembership = true):
   };
 }
 
+function summarizeListRecord(record: CloudKitRecordItem): { list: RemindersList; summary: RemindersListSummary } {
+  if (!("recordType" in record)) {
+    const list: RemindersList = { id: record.recordName, title: null, color: null, count: null, isGroup: null, deleted: true, reminderIds: null, raw: {} };
+    return { list, summary: { id: list.id, title: null, color: null, count: null, isGroup: null, deleted: true, reminderIds: null } };
+  }
+  const normalized = normalizeList(record, false);
+  const list = { ...normalized, deleted: record.deleted === true || normalized.deleted === true ? true : normalized.deleted, raw: {} };
+  const summary: RemindersListSummary = { id: list.id, title: list.title, color: list.color, count: list.count, isGroup: list.isGroup, deleted: list.deleted, reminderIds: null };
+  return { list, summary };
+}
+
 export function normalizeReminder(record: CloudKitRecord, expectedOwner = DEFAULT_OWNER): Reminder {
   requireValue(record.recordType === "Reminder", "Only Reminders Reminder records can be normalized as reminders.");
   const id = recordName(record.recordName, ["Reminder"]);
@@ -397,7 +417,7 @@ function parseRecord(value: unknown, expectedOwner: string, allowDefaultOwner = 
   };
 }
 
-function pageRecords(value: unknown, limit: number, absoluteLimit = MAX_PAGE_SIZE, expectedOwner = DEFAULT_OWNER, changeHistory = false, allowDefaultOwner = true): { records: CloudKitRecordItem[]; recordErrors: CloudKitRecordError[] } {
+function pageRecords(value: unknown, limit: number, absoluteLimit = MAX_PAGE_SIZE, expectedOwner = DEFAULT_OWNER, allowDefaultOwner = true, allowDuplicates = false): { records: CloudKitRecordItem[]; recordErrors: CloudKitRecordError[] } {
   requireValue(Array.isArray(value), "Apple returned a malformed CloudKit records page.");
   requireValue(value.length <= limit && value.length <= absoluteLimit, "Apple returned more records than the supported page budget.");
   const records: CloudKitRecordItem[] = [];
@@ -409,7 +429,7 @@ function pageRecords(value: unknown, limit: number, absoluteLimit = MAX_PAGE_SIZ
       recordErrors.push(parsed);
       continue;
     }
-    requireValue(changeHistory || !names.has(parsed.recordName), "Apple returned a duplicate record in one page.");
+    requireValue(allowDuplicates || !names.has(parsed.recordName), "Apple returned a duplicate record in one page.");
     names.add(parsed.recordName);
     records.push(parsed);
   }
@@ -430,13 +450,10 @@ function parseTopLevelError(body: Record<string, unknown>, context: { path: Read
   if (["THROTTLED", "REQUEST_RATE_LIMITED", "ZONE_BUSY"].includes(normalized)) {
     throw new CloudKitRateLimitedError(null);
   }
-  if (context.path === "/changes/zone" && normalized === "CHANGE_TOKEN_EXPIRED") {
-    throw new AppError("RESTART_REQUIRED", "Apple expired the saved catalogue checkpoint. Restart the initial catalogue scan; your saved lists are preserved.", 409);
-  }
   throw new AppError("PROTOCOL_CHANGED", "Apple rejected the Reminders read request.");
 }
 
-type ReadPath = "/zones/list" | "/records/lookup" | "/records/query" | "/changes/zone";
+type ReadPath = "/zones/list" | "/records/lookup" | "/records/query";
 
 export class CloudKitRemindersClient {
   private readonly endpoint: URL;
@@ -462,7 +479,6 @@ export class CloudKitRemindersClient {
     this.endpoint = endpoint;
     this.params = new URLSearchParams();
     this.params.set("remapEnums", "true");
-    this.params.set("getCurrentSyncToken", "true");
     this.params.set("clientBuildNumber", connection.clientBuildNumber);
     this.params.set("clientMasteringNumber", connection.clientMasteringNumber);
     this.params.set("clientId", connection.clientId);
@@ -497,21 +513,6 @@ export class CloudKitRemindersClient {
       throw new CloudKitRateLimitedError(retry !== null && Number.isFinite(retry) ? retry : null);
     }
     if (response.status !== 200) {
-      // Apple can also report expired cursors as HTTP errors. Recognition is
-      // restricted to this authenticated changes endpoint and this exact code;
-      // authentication, access and throttling statuses above retain precedence.
-      if (path === "/changes/zone" && response.status >= 400 && response.status < 500) {
-        let expiredResponse: Record<string, unknown> | null = null;
-        try { expiredResponse = object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.bytes)), "Apple returned a malformed change error."); } catch { /* Preserve the normal HTTP error below. */ }
-        if (expiredResponse?.serverErrorCode === "CHANGE_TOKEN_EXPIRED") parseTopLevelError(expiredResponse, { path, upstreamStatus: response.status, hasSessionCookie });
-        if (Array.isArray(expiredResponse?.zones) && expiredResponse.zones.length === 1) {
-          const errorZone = object(expiredResponse.zones[0], "Apple returned a malformed change error zone.");
-          if (errorZone.serverErrorCode === "CHANGE_TOKEN_EXPIRED") {
-            zoneID(errorZone.zoneID, false, true, this.expectedOwner);
-            parseTopLevelError(errorZone, { path, upstreamStatus: response.status, hasSessionCookie });
-          }
-        }
-      }
       console.warn({ event: "apple-reminders-http-rejected", path, upstreamStatus: response.status });
       if (response.status >= 500) throw new AppError("UPSTREAM_UNAVAILABLE", "Apple could not complete the Reminders read request.", 503, true);
       throw new AppError("PROTOCOL_CHANGED", "Apple returned an unexpected status for the Reminders read request.");
@@ -528,9 +529,9 @@ export class CloudKitRemindersClient {
       const type = record && typeof record === "object" && RECORD_TYPES.has(record.recordType) ? record.recordType as string : "other";
       recordTypes[type] = (recordTypes[type] ?? 0) + 1;
     }
-    const redactedRequest = JSON.parse(JSON.stringify(payload, (key, value) => ["recordName", "ownerRecordName", "syncToken", "continuationMarker"].includes(key) ? "[redacted]" : key === "zoneName" && value !== "Reminders" ? "[other authorized zone]" : value)) as Record<string, unknown>;
+    const redactedRequest = JSON.parse(JSON.stringify(payload, (key, value) => ["recordName", "ownerRecordName", "continuationMarker"].includes(key) ? "[redacted]" : key === "zoneName" && value !== "Reminders" ? "[other authorized zone]" : value)) as Record<string, unknown>;
     const redactedURL = new URL(url); redactedURL.searchParams.set("dsid", "[redacted]"); redactedURL.searchParams.set("clientId", "[redacted]");
-    this.readTrace.push({ path, url: redactedURL.href, request: redactedRequest, response: { status: response.status, returnedRecords: records.length, recordTypes, zones: zones.length, moreComing: zones.map(zone => zone?.moreComing === true ? true : zone?.moreComing === false ? false : null), syncTokenPresent: typeof result.syncToken === "string" || zones.some(zone => typeof zone?.syncToken === "string"), continuationPresent: typeof result.continuationMarker === "string", recordErrors: records.filter(record => record && typeof record.serverErrorCode === "string").length } });
+    this.readTrace.push({ path, url: redactedURL.href, request: redactedRequest, response: { status: response.status, returnedRecords: records.length, recordTypes, zones: zones.length, continuationPresent: typeof result.continuationMarker === "string", recordErrors: records.filter(record => record && typeof record.serverErrorCode === "string").length } });
     parseTopLevelError(result, { path, upstreamStatus: response.status, hasSessionCookie });
     return result;
   }
@@ -543,10 +544,8 @@ export class CloudKitRemindersClient {
     for (const value of result.zones) {
       const raw = object(value, "Apple returned a malformed CloudKit zone.");
       const id = zoneID(raw.zoneID, false, false) ?? (() => { throw new AppError("PROTOCOL_CHANGED", "Apple returned a malformed CloudKit zone."); })();
-      const syncToken = optionalString(raw.syncToken, "Apple returned a malformed CloudKit zone checkpoint.");
-      if (syncToken !== null) validateToken(syncToken, "Apple returned a malformed CloudKit zone checkpoint.");
       if (raw.deleted !== undefined) requireValue(typeof raw.deleted === "boolean", "Apple returned a malformed zone deleted marker.");
-      const zone: CloudKitZone = { zoneID: id, syncToken, deleted: raw.deleted === true, raw };
+      const zone: CloudKitZone = { zoneID: id, deleted: raw.deleted === true };
       zones.push(zone);
       if (id.zoneName === REMINDERS_ZONE.zoneName) {
         // This is the sole bootstrap authority: the authenticated, fixed
@@ -560,35 +559,6 @@ export class CloudKitRemindersClient {
     const remindersZone = matches[0] ?? null;
     if (remindersZone && !remindersZone.deleted && this.owner === undefined) this.owner = remindersZone.zoneID.ownerRecordName ?? DEFAULT_OWNER;
     return { zones, remindersZone, available: remindersZone !== null && !remindersZone.deleted, complete: true };
-  }
-
-  async probeOtherZones() {
-    const discovered = await this.listZones();
-    requireValue(discovered.available, "Apple did not return the private Reminders zone.");
-    const candidates = discovered.zones.filter(zone => !zone.deleted && zone.zoneID.zoneName !== "Reminders" && zone.zoneID.zoneType === "REGULAR_CUSTOM_ZONE" && (zone.zoneID.ownerRecordName ?? DEFAULT_OWNER) === this.expectedOwner);
-    requireValue(candidates.length <= 2, "The additional zone diagnostic exceeds its two-zone budget.");
-    const summaries = [];
-    for (const candidate of candidates) {
-      const requestedZone = { zoneName: candidate.zoneID.zoneName, zoneType: candidate.zoneID.zoneType };
-      const result = await this.post("/changes/zone", { zones: [{ zoneID: requestedZone, reverse: true }], resultsLimit: 50 });
-      requireValue(Array.isArray(result.zones) && result.zones.length === 1, "Apple returned an ambiguous additional-zone response.");
-      const raw = object(result.zones[0], "Apple returned a malformed additional zone.");
-      const id = zoneID(raw.zoneID, false, false);
-      requireValue(id?.zoneName === requestedZone.zoneName && (id.zoneType === undefined || id.zoneType === requestedZone.zoneType) && (id.ownerRecordName === undefined || id.ownerRecordName === DEFAULT_OWNER || id.ownerRecordName === this.expectedOwner), "Apple returned data outside the authorized additional zone.");
-      requireValue(Array.isArray(raw.records) && raw.records.length <= 50, "Apple exceeded the additional-zone record budget.");
-      const recordTypes: Record<string, number> = {}, fields = new Set<string>();
-      const allowedFields = ["List", "Lists", "ListIDs", "DefaultList", "DefaultListID", "Name", "Order", "Ordering", "ListOrdering", "Deleted", "IsGroup", "Title", "Color", "Count", "ReminderIDs", "ParentList", "Share", "Sharing", "SharingInfo"];
-      for (const item of raw.records) {
-        const record = object(item, "Apple returned malformed additional-zone data.");
-        const recordZone = zoneID(record.zoneID, true, false);
-        if (recordZone) requireValue(recordZone.zoneName === id.zoneName && (recordZone.ownerRecordName === undefined || recordZone.ownerRecordName === DEFAULT_OWNER || recordZone.ownerRecordName === this.expectedOwner), "Apple returned a record outside the authorized additional zone.");
-        const type = typeof record.recordType === "string" && ["List", "Reminder", "Account", "User", "Settings", "ListGroup", "SmartList", "Metadata"].includes(record.recordType) ? record.recordType : "other";
-        recordTypes[type] = (recordTypes[type] ?? 0) + 1;
-        if (record.fields && typeof record.fields === "object" && !Array.isArray(record.fields)) for (const key of Object.keys(record.fields)) if (allowedFields.includes(key)) fields.add(key);
-      }
-      summaries.push({ metadataZone: /metadata/i.test(id.zoneName), records: raw.records.length, recordTypes, fieldNames: [...fields], moreComing: raw.moreComing === true, responseError: typeof raw.serverErrorCode === "string" });
-    }
-    return { zones: summaries, complete: true };
   }
 
   async probeSharedLists(listIds: string[]) {
@@ -616,7 +586,7 @@ export class CloudKitRemindersClient {
     const summaries = [];
     for (const candidate of candidates) {
       const result = await this.post("/records/lookup", { records: requested.map(recordName => ({ recordName })), zoneID: candidate, desiredKeys: LIST_SUMMARY_KEYS }, "shared");
-      const page = pageRecords(result.records, requested.length, 10, candidate.ownerRecordName!, false, false);
+      const page = pageRecords(result.records, requested.length, 10, candidate.ownerRecordName!, false);
       for (const record of page.records) requireValue(requested.includes(record.recordName) && (!("recordType" in record) || record.recordType === "List"), "Apple returned an unrequested shared list.");
       for (const error of page.recordErrors) requireValue(error.recordName !== null && requested.includes(error.recordName), "Apple returned an unrequested shared-list error.");
       const answered = new Set([...page.records.map(record => record.recordName), ...page.recordErrors.map(error => error.recordName)]);
@@ -651,64 +621,6 @@ export class CloudKitRemindersClient {
     };
   }
 
-  async cataloguePage(options: { syncToken?: string | null; limit?: number; reverse?: boolean; knownListIds?: readonly string[] }): Promise<CloudKitPage> {
-    const page = await this.changesPage({ ...options, desiredRecordTypes: ["List", "Reminder"], desiredKeys: [...LIST_SUMMARY_KEYS, "List"] });
-    const lists = page.records.filter(record => record.recordName.startsWith("List/"));
-    const present = new Set([...lists.map(record => record.recordName), ...(options.knownListIds ?? [])]);
-    const candidates = new Set<string>();
-    for (const record of page.records) {
-      if (!("recordType" in record) || record.recordType !== "Reminder" || record.deleted || boolField(record, "Deleted") === true) continue;
-      const listId = referenceField(record, "List", "List", this.expectedOwner);
-      requireValue(listId !== null, "Apple returned a reminder without its source-proven List relationship.");
-      if (!present.has(listId)) candidates.add(listId);
-    }
-    const errors = [...page.recordErrors];
-    if (candidates.size) {
-      // One bounded lookup, using only references returned by the authenticated
-      // private zone. No reminder text, membership or asset data is requested.
-      const lookup = await this.lookup([...candidates], true);
-      requireValue(lookup.unresolvedRecordNames.length === 0, "Apple omitted a referenced list from the lookup response.");
-      lists.push(...lookup.records);
-      for (const error of lookup.recordErrors) {
-        // Old reminder changes can refer to a list that no longer exists.
-        // Keep an authoritative absence so older changes cannot resurrect it.
-        if (error.serverErrorCode === "UNKNOWN_ITEM" && error.recordName) lists.push({ recordName: error.recordName, deleted: true, raw: error.raw });
-        else errors.push(error);
-      }
-    }
-    return { ...page, records: lists, recordErrors: errors, complete: page.paginationComplete && errors.length === 0, pendingReason: page.pendingReason ?? (errors.length ? "record_errors" : null) };
-  }
-
-  async catalogueSyncPage(options: { syncToken?: string | null; limit?: number }): Promise<CloudKitPage> {
-    const page = await this.changesPage({ syncToken: options.syncToken, limit: options.limit, desiredRecordTypes: ["List", "Reminder"], desiredKeys: [...LIST_SUMMARY_KEYS, "List"] });
-    // A checkpoint acknowledges the entire source page. Partial source errors
-    // cannot be committed, even when the errored record appears unrelated.
-    requireValue(page.recordErrors.length === 0, "Apple returned record errors in the catalogue change page. The saved checkpoint was not advanced.");
-    const touched = new Set<string>();
-    for (const record of page.records) {
-      if (record.recordName.startsWith("List/")) touched.add(record.recordName);
-      else if ("recordType" in record && record.recordType === "Reminder") {
-        const listId = referenceField(record, "List", "List", this.expectedOwner);
-        // Logical reminder deletion uses Deleted=1 as well as CloudKit's
-        // tombstone marker. Such history can legitimately omit its old List.
-        requireValue(listId !== null || record.deleted === true || boolField(record, "Deleted") === true, "Apple returned a reminder without its source-proven List relationship.");
-        if (listId !== null) touched.add(listId);
-      }
-    }
-    if (!touched.size) return { ...page, records: [] };
-    // Historical records identify what to refresh, never the current state.
-    // Lookup every touched identifier, including known lists and tombstones.
-    const current = await this.lookup([...touched], true);
-    requireValue(current.unresolvedRecordNames.length === 0, "Apple omitted a touched list from its current lookup. The saved checkpoint was not advanced.");
-    const lists = [...current.records];
-    for (const record of lists) requireValue(!("recordType" in record) || record.recordType === "List", "Apple returned an unexpected record in the current list lookup.");
-    for (const error of current.recordErrors) {
-      requireValue(error.recordName !== null && ["UNKNOWN_ITEM", "NOT_FOUND"].includes(error.serverErrorCode), "Apple could not refresh a touched list. The saved checkpoint was not advanced.");
-      lists.push({ recordName: error.recordName, deleted: true, raw: error.raw });
-    }
-    return { ...page, records: lists, recordErrors: [], complete: page.paginationComplete };
-  }
-
   async queryPage(options: { recordType: "List" | "Reminder"; limit?: number; continuation?: string | null }): Promise<CloudKitPage> {
     requireInput(options.recordType === "List" || options.recordType === "Reminder", "The requested Reminders query record type is invalid.");
     const limit = boundedLimit(options.limit);
@@ -721,6 +633,118 @@ export class CloudKitRemindersClient {
       requireValue(type === options.recordType, "Apple returned an unrequested record type in the Reminders query page.");
     }
     return page;
+  }
+
+  async queryListsPage(options: { limit?: number; continuation?: string | null } = {}): Promise<CloudKitPage> {
+    return this.queryListsPageInternal(options, false);
+  }
+
+  private async queryListsPageInternal(options: { limit?: number; continuation?: string | null }, allowRepeatedContinuation: boolean): Promise<CloudKitPage> {
+    const limit = boundedLimit(options.limit);
+    const continuation = requestedToken(options.continuation, "The CloudKit continuation marker is invalid.");
+    if (this.owner === undefined) {
+      const discovery = await this.listZones();
+      requireValue(discovery.available, "Apple did not return the private Reminders zone.");
+    }
+    const payload: Record<string, unknown> = {
+      query: { recordType: "Lists" },
+      zoneID: this.requestZone,
+      resultsLimit: limit,
+    };
+    if (continuation) payload.continuationMarker = continuation;
+    const result = await this.post("/records/query", payload);
+    // This experimental endpoint uses the observed plural query type while
+    // CloudKit still returns singular List records. Membership is deliberately
+    // not projected; callers of queryAllLists receive only normalized summaries.
+    const page = this.queryResponse(result, limit, continuation, MAX_PAGE_SIZE, allowRepeatedContinuation, true);
+    requireValue(result.moreComing === undefined || result.moreComing === null || typeof result.moreComing === "boolean", "Apple returned a malformed list query pagination flag.");
+    requireValue(result.moreComing !== true || page.continuation !== null, "Apple reported more list results without a continuation marker.");
+    for (const record of page.records) {
+      const type = "recordType" in record ? record.recordType : record.recordName.slice(0, record.recordName.indexOf("/"));
+      requireValue(type === "List", "Apple returned an unrequested record type in the Reminders list query page.");
+    }
+    for (const error of page.recordErrors) if (error.recordName !== null) recordName(error.recordName, ["List"]);
+    return page;
+  }
+
+  async queryAllLists(): Promise<CloudKitAllListsResult> {
+    const startedAt = performance.now();
+    const summaries = new Map<string, { list: RemindersList; summary: RemindersListSummary }>();
+    const seenContinuations = new Set<string>();
+    let aggregateBytes = 0;
+    let pagesRead = 0;
+    let continuation: string | null = null;
+    let sawRecordErrors = false;
+    let stoppedReason: CloudKitAllListsResult["pendingReason"] = null;
+
+    if (this.owner === undefined) {
+      const discovery = await this.listZones();
+      requireValue(discovery.available, "Apple did not return the private Reminders zone.");
+    }
+
+    for (;;) {
+      if (performance.now() - startedAt >= MAX_ALL_LIST_DURATION_MS) {
+        stoppedReason = "time_limit";
+        break;
+      }
+      const page = await this.queryListsPageInternal({ limit: MAX_PAGE_SIZE, continuation }, true);
+      pagesRead++;
+      if (page.recordErrors.length > 0) {
+        const hasSessionCookie = this.http.jar.header(this.endpoint).length > 0;
+        const topLevelErrorCodes = new Set([
+          "AUTHENTICATION_REQUIRED", "NOT_AUTHENTICATED", "INVALID_AUTH_TOKEN", "AUTHENTICATION_FAILED",
+          "ACCESS_DENIED", "PERMISSION_FAILURE", "THROTTLED", "REQUEST_RATE_LIMITED", "ZONE_BUSY",
+        ]);
+        for (const error of page.recordErrors) {
+          if (topLevelErrorCodes.has(error.serverErrorCode.toUpperCase())) parseTopLevelError({ serverErrorCode: error.serverErrorCode }, { path: "/records/query", upstreamStatus: 200, hasSessionCookie });
+        }
+        sawRecordErrors = true;
+      }
+
+      for (const record of page.records) {
+        const normalized = summarizeListRecord(record);
+        const previous = summaries.get(normalized.summary.id);
+        if (previous) {
+          requireValue(JSON.stringify(previous.summary) === JSON.stringify(normalized.summary), "Apple returned conflicting duplicate Reminders list records.");
+          continue;
+        }
+        if (summaries.size >= MAX_ALL_LIST_IDS) {
+          stoppedReason = "list_limit";
+          break;
+        }
+        const bytes = new TextEncoder().encode(JSON.stringify(normalized.summary)).length;
+        if (aggregateBytes + bytes > MAX_ALL_LIST_SUMMARY_BYTES) {
+          stoppedReason = "summary_byte_limit";
+          break;
+        }
+        summaries.set(normalized.summary.id, normalized);
+        aggregateBytes += bytes;
+      }
+      if (stoppedReason) break;
+      if (performance.now() - startedAt >= MAX_ALL_LIST_DURATION_MS) {
+        stoppedReason = "time_limit";
+        break;
+      }
+      if (page.continuation === null) break;
+      if (seenContinuations.has(page.continuation)) {
+        stoppedReason = "continuation_cycle";
+        break;
+      }
+      seenContinuations.add(page.continuation);
+      if (pagesRead >= MAX_ALL_LIST_PAGES) {
+        stoppedReason = "page_limit";
+        break;
+      }
+      continuation = page.continuation;
+    }
+
+    const complete = stoppedReason === null && !sawRecordErrors;
+    return {
+      lists: [...summaries.values()].map(entry => entry.list),
+      complete,
+      pagesRead,
+      pendingReason: stoppedReason ?? (sawRecordErrors ? "record_errors" : null),
+    };
   }
 
   async queryRemindersPage(options: { listId: string; includeCompleted: boolean; limit?: number; continuation?: string | null }): Promise<CloudKitPage> {
@@ -752,54 +776,15 @@ export class CloudKitRemindersClient {
     return page;
   }
 
-  private queryResponse(result: Record<string, unknown>, limit: number, requestedContinuation: string | null, absoluteLimit = MAX_PAGE_SIZE): CloudKitPage {
-    const parsed = pageRecords(result.records, limit, absoluteLimit, this.expectedOwner);
+  private queryResponse(result: Record<string, unknown>, limit: number, requestedContinuation: string | null, absoluteLimit = MAX_PAGE_SIZE, allowRepeatedContinuation = false, allowDuplicates = false): CloudKitPage {
+    const parsed = pageRecords(result.records, limit, absoluteLimit, this.expectedOwner, true, allowDuplicates);
     const next = optionalString(result.continuationMarker, "Apple returned a malformed query continuation marker.");
     if (next !== null) {
       validateToken(next, "Apple returned a malformed query continuation marker.");
-      requireValue(next !== requestedContinuation, "Apple repeated a query continuation marker.");
+      requireValue(allowRepeatedContinuation || next !== requestedContinuation, "Apple repeated a query continuation marker.");
     }
-    const syncToken = optionalString(result.syncToken, "Apple returned a malformed query checkpoint.");
-    if (syncToken !== null) validateToken(syncToken, "Apple returned a malformed query checkpoint.");
     const paginationComplete = next === null;
     const pendingReason = next !== null ? "continuation" : parsed.recordErrors.length ? "record_errors" : null;
-    return { ...parsed, paginationComplete, complete: paginationComplete && parsed.recordErrors.length === 0, continuation: next, syncToken, pendingReason };
-  }
-
-  async changesPage(options: { desiredRecordTypes: Array<"List" | "Reminder">; desiredKeys?: string[]; syncToken?: string | null; limit?: number; reverse?: boolean }): Promise<CloudKitPage> {
-    requireInput(Array.isArray(options.desiredRecordTypes) && options.desiredRecordTypes.length > 0 && options.desiredRecordTypes.length <= 2, "The requested Reminders change record types are invalid.");
-    const desiredRecordTypes = [...options.desiredRecordTypes];
-    requireInput(desiredRecordTypes.every((type) => type === "List" || type === "Reminder"), "The requested Reminders change record types are invalid.");
-    requireInput(new Set(desiredRecordTypes).size === desiredRecordTypes.length, "The requested Reminders change record types contain duplicates.");
-    const limit = boundedLimit(options.limit);
-    const syncToken = requestedToken(options.syncToken, "The CloudKit change checkpoint is invalid.");
-    const desiredKeys = options.desiredKeys;
-    if (desiredKeys !== undefined) {
-      const allowed = new Set(["Name", "Color", "Count", "IsGroup", "BadgeEmblem", "SortingStyle", "Deleted", "ReminderIDs", "TitleDocument", "NotesDocument", "List", "Completed", "CompletionDate", "DueDate", "StartDate", "Priority", "Flagged", "AllDay", "TimeZone", "ParentReminder", "AlarmIDs", "AttachmentIDs", "HashtagIDs", "RecurrenceRuleIDs", "CreationDate", "LastModifiedDate"]);
-      requireInput(Array.isArray(desiredKeys) && desiredKeys.length <= allowed.size && desiredKeys.every((key) => allowed.has(key)), "The requested Reminders fields are outside the supported read projection.");
-    }
-    const zoneRequest: Record<string, unknown> = { zoneID: this.requestZone, desiredRecordTypes };
-    requireInput(options.reverse === undefined || typeof options.reverse === "boolean", "The requested catalogue ordering is invalid.");
-    if (options.reverse) zoneRequest.reverse = true;
-    if (desiredKeys !== undefined) zoneRequest.desiredKeys = [...desiredKeys];
-    if (syncToken) zoneRequest.syncToken = syncToken;
-    const result = await this.post("/changes/zone", { zones: [zoneRequest], resultsLimit: limit });
-    requireValue(Array.isArray(result.zones) && result.zones.length === 1, "Apple returned an ambiguous Reminders change response.");
-    const zone = object(result.zones[0], "Apple returned a malformed Reminders change page.");
-    zoneID(zone.zoneID, false, true, this.expectedOwner);
-    parseTopLevelError(zone, { path: "/changes/zone", upstreamStatus: 200, hasSessionCookie: this.http.jar.header(this.endpoint).length > 0 });
-    const nextSyncToken = validateToken(zone.syncToken, "Apple omitted the Reminders change checkpoint.");
-    if (zone.moreComing === true) requireValue(nextSyncToken !== syncToken, "Apple repeated a Reminders change checkpoint while reporting more changes.");
-    requireValue(zone.moreComing === true || zone.moreComing === false || zone.moreComing === null || zone.moreComing === undefined, "Apple returned an invalid Reminders pagination marker.");
-    const parsed = pageRecords(zone.records, limit, MAX_PAGE_SIZE, this.expectedOwner, true);
-    for (const record of parsed.records) {
-      const type = "recordType" in record ? record.recordType : record.recordName.slice(0, record.recordName.indexOf("/"));
-      requireValue(desiredRecordTypes.includes(type as "List" | "Reminder"), "Apple returned an unrequested record type in the Reminders change page.");
-    }
-    // Pinned pyicloud treats null/omitted moreComing as terminal. Apple is
-    // observed to return null here; a checkpoint alone is not a next-page signal.
-    const paginationComplete = zone.moreComing !== true;
-    const pendingReason = !paginationComplete ? "more_coming" : parsed.recordErrors.length ? "record_errors" : null;
-    return { ...parsed, paginationComplete, complete: paginationComplete && parsed.recordErrors.length === 0, continuation: null, syncToken: nextSyncToken, pendingReason, moreComing: zone.moreComing === true ? true : zone.moreComing === false ? false : null };
+    return { ...parsed, paginationComplete, complete: paginationComplete && parsed.recordErrors.length === 0, continuation: next, pendingReason };
   }
 }

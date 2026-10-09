@@ -33,7 +33,7 @@ does not confer the owner's identity or permission to read their Apple session.
 ## System and trust boundaries
 
 Protected assets include Apple session cookies/tokens, account identifiers, reminder contents,
-encryption keys and saved synchronization checkpoints. Requests, WebSocket messages, CloudKit
+encryption keys, encrypted list summaries and reminder pagination state. Requests, WebSocket messages, CloudKit
 responses, opaque cursors and decrypted protocol documents remain untrusted inputs.
 
 The Apple password is processed by a dedicated browser script. The Worker receives authentication
@@ -53,8 +53,15 @@ application's local 24-hour session limit.
   to SMS, voice or legacy authentication. Reject missing, mismatched or replayed protocol proofs.
 - Keep the absolute session lifetime bounded. Reads must not extend it. Disconnect must clear
   stored session state; expiry must reject reads and clear expired records on access.
+- Authorize known list IDs with a current exact private-zone lookup; encrypted saved summaries
+  alone are never proof of access. Reject wrong zone/owner, deleted lists and groups before content
+  reads. Direct discovery is the sole path and must report unsupported or incomplete results
+  without a historical fallback.
+- Commit direct list snapshots only after complete, bounded discovery. Strip recognized retired
+  historical fields without resetting valid Apple sessions. All-open continuations retain their original list selection,
+  remain single-use and expire with the session or after ten minutes.
 - Keep reminder writes disabled. Use bounded reads, pagination, transport sizes, decompression,
-  checkpoint-cycle detection and upstream backoff rather than indefinite retries.
+  continuation-cycle detection and upstream backoff rather than indefinite retries.
 - Prevent cross-origin state changes and authentication WebSocket access. Preserve the isolated
   credential page's nonce CSP and no-referrer policy; do not add analytics or third-party scripts.
 - Never log credentials, proof material, cookies, raw Apple errors, reminder contents, opaque

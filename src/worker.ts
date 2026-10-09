@@ -1,16 +1,11 @@
 import handler from "vinext/server/fetch-handler";
 import { runWithConnectorBinding } from "./lib/connector-context";
 import type { ConnectorBinding } from "./lib/connector-contract.mjs";
-import { runCatalogueBackground } from "./auth/catalogue-background";
 import { applicationRoute } from "./api/router";
 import type { RuntimeEnv } from "./platform/sites";
 import credentialJS from "virtual:apple-credential-script";
 
-export default {
-  async scheduled(_event: ScheduledController, env: Cloudflare.Env & RuntimeEnv) {
-    const result = await runCatalogueBackground(env);
-    if (result.started) console.info({ event: "apple-catalogue-background-check", ...result });
-  },
+const worker = {
   async fetch(request: Request, env: Cloudflare.Env & RuntimeEnv, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
     const appResponse = await applicationRoute(request, env, credentialJS);
     if (appResponse) return appResponse;
@@ -47,3 +42,4 @@ export default {
     return secured;
   },
 };
+export default worker;

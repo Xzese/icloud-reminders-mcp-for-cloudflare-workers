@@ -787,85 +787,6 @@ button[aria-disabled="true"] {
   color: var(--destructive) !important;
 }
 
-.scan-summary {
-  display: grid;
-  margin-top: 16px;
-  gap: 13px;
-  padding: 15px;
-  border: 1px solid var(--border);
-  border-radius: 13px;
-  background: var(--muted);
-}
-
-.scan-summary-top {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.scan-summary-top > * {
-  min-width: 0;
-}
-
-.scan-stats {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 18px;
-  color: var(--muted-foreground);
-  font-size: 0.875rem;
-}
-
-.scan-stats span {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
-}
-
-.scan-stats strong {
-  color: var(--foreground);
-  font-weight: 650;
-}
-
-progress.scan-progress,
-.scan-progress {
-  display: block;
-  width: 100%;
-  height: 8px;
-  overflow: hidden;
-  appearance: none;
-  border: 0;
-  border-radius: 999px;
-  background: var(--secondary);
-  color: var(--primary);
-}
-
-.scan-progress::-webkit-progress-bar {
-  border-radius: 999px;
-  background: var(--secondary);
-}
-
-.scan-progress::-webkit-progress-value {
-  border-radius: 999px;
-  background: var(--primary);
-}
-
-.scan-progress::-moz-progress-bar {
-  border-radius: 999px;
-  background: var(--primary);
-}
-
-.scan-progress:indeterminate {
-  background: linear-gradient(90deg, var(--secondary) 0%, var(--primary) 45%, var(--secondary) 90%);
-  background-size: 220% 100%;
-  animation: scan-progress 1.5s ease-in-out infinite;
-}
-
-@keyframes scan-progress {
-  to { background-position: -220% 0; }
-}
-
 .list-preview {
   display: grid;
   gap: 9px;
@@ -1368,17 +1289,6 @@ footer {
 
 .controlled-read .reminder-filter button {
   margin: 0;
-}
-
-.controlled-read .catalogue-auto-status {
-  margin: 15px 0;
-  padding: 13px;
-  border-radius: 11px;
-  background: var(--muted);
-}
-
-.catalogue-auto-status p:last-child {
-  margin-bottom: 0;
 }
 
 .consent-option {

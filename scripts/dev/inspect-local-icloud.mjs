@@ -3,10 +3,8 @@
 import http from "node:http";
 const origin = "http://127.0.0.1:5173";
 const [command = "status", option] = process.argv.slice(2);
-if (!["status", "discover", "read-test", "catalogue", "other-zones", "lookup-lists", "shared-lists", "saved-lists", "batch-read", "sync-catalogue", "mcp-open-reminders", "mcp-all-open-reminders"].includes(command)) throw new Error("Use status, discover, other-zones, catalogue <1..100 pages>, lookup-lists <List/id ...>, or read-test.");
+if (!["status", "discover", "read-test", "current-lists", "lookup-lists", "shared-lists", "saved-lists", "batch-read", "mcp-open-reminders", "mcp-all-open-reminders"].includes(command)) throw new Error("Use status, discover, current-lists, saved-lists, lookup-lists <List/id ...>, or read-test.");
 if (command === "read-test" && option !== undefined && option !== "open") throw new Error("Use read-test [open].");
-const pages = command === "catalogue" ? Number(option ?? 25) : 1;
-if (!Number.isInteger(pages) || pages < 1 || pages > 100) throw new Error("The page budget must be 1..100.");
 const cookie = await new Promise((resolve, reject) => {
   const request = http.get(origin, { headers: { "sec-fetch-mode": "navigate", "sec-fetch-dest": "document" } }, response => {
     response.resume(); response.on("end", () => {
@@ -17,7 +15,7 @@ const cookie = await new Promise((resolve, reject) => {
   request.setTimeout(3000, () => request.destroy(new Error("Local dashboard timed out."))); request.on("error", reject);
 });
 const call = async (path, body, signal) => {
-  const requestTimeout = path === "/mcp" ? 40_000 : body?.action === "sync-catalogue" ? 28_000 : 15_000;
+  const requestTimeout = path === "/mcp" ? 40_000 : body?.action === "current-lists" ? 28_000 : 15_000;
   const response = await fetch(origin + path, { headers: { cookie, ...(body ? { origin, "content-type": "application/json", accept: "application/json, text/event-stream" } : {}) }, ...(body ? { method: "POST", body: JSON.stringify(body) } : {}), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(requestTimeout)]) : AbortSignal.timeout(requestTimeout) });
   const value = await response.json();
   if (!response.ok) { console.log(JSON.stringify({ httpStatus: response.status, error: value.error })); throw new Error("Read-only local diagnostic failed."); }
@@ -27,18 +25,10 @@ const status = await call("/api/connection");
 console.log(JSON.stringify({ operation: "status", state: status.state, generation: status.generation, transportReady: status.transportReady, action: status.action, writesEnabled: status.gates.writesEnabled }));
 if (command === "status") process.exit(0);
 if (status.state !== "READY") throw new Error("The Apple connection is not ready for a controlled read.");
-if (command === "sync-catalogue") {
-  const { syncCatalogue, mergeCatalogueChoices, selectableList } = await import("../../src/app/catalogue-scan.ts");
-  const saved = await call("/api/apple/read", { action: "saved-lists", expectedGeneration: status.generation });
-  let catalogue = saved.result.records, progress = saved.result.catalogueSync; const started = Date.now();
-  const result = await syncCatalogue({ generation: status.generation, restart: option === "restart", signal: new AbortController().signal,
-    read: async (body, signal) => (await call("/api/apple/read", body, signal)).result,
-    onPage: page => { catalogue = mergeCatalogueChoices(catalogue, page); progress = page.catalogueSync; if (progress.pages % 25 === 0 || !progress.pending) console.log(JSON.stringify({ operation: "sync-progress", elapsedMs: Date.now() - started, ...progress, selectableLists: catalogue.filter(selectableList).length })); },
-  });
-  console.log(JSON.stringify({ operation: "sync-summary", elapsedMs: Date.now() - started, reason: result.reason, ...progress, selectableLists: catalogue.filter(selectableList).length, writesEnabled: false }));
-} else if (command === "saved-lists") {
-  const response = await call("/api/apple/read", { action: "saved-lists", expectedGeneration: status.generation });
-  console.log(JSON.stringify({ operation: "saved-lists", knownListsFound: response.result.records.flatMap(record => !record.deleted && !record.isGroup ? (["Shopping", "Software to do list", "Reminders"].find(name => name.toLowerCase() === record.title?.toLowerCase()) ?? []) : []), identifiers: response.result.records.length, availableLists: response.result.records.filter(record => !record.deleted && !record.isGroup).length, namesPresent: response.result.records.filter(record => typeof record.title === "string").length, appleRequests: response.result.requestTrace.length, catalogueSync: response.result.catalogueSync, catalogueAuto: response.result.catalogueAuto, writesEnabled: false }));
+if (command === "current-lists" || command === "saved-lists") {
+  const started = Date.now();
+  const response = await call("/api/apple/read", { action: command, expectedGeneration: status.generation });
+  console.log(JSON.stringify({ operation: command, elapsedMs: Date.now() - started, identifiers: response.result.records.length, availableLists: response.result.records.filter(record => !record.deleted && !record.isGroup).length, appleRequests: response.result.requestTrace?.length, pagesRead: response.result.pagesRead, complete: response.result.complete, source: response.result.source, freshness: response.result.freshness, writesEnabled: false }));
 } else if (command === "mcp-open-reminders") {
   const invoke = async (name, args) => {
     const response = await call("/mcp", { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } });
@@ -80,44 +70,20 @@ if (command === "sync-catalogue") {
   const listIds = process.argv.slice(3).filter(value => value.startsWith("List/"));
   const expectedZoneOwner = process.argv.slice(3).find(value => value.startsWith("owner="))?.slice(6);
   const response = await call("/api/apple/read", { action: "lookup-lists", expectedGeneration: status.generation, listIds, ...(expectedZoneOwner ? { expectedZoneOwner } : {}) });
-  console.log(JSON.stringify({ operation: "direct-list-lookup", requested: listIds.length, returned: response.result.records.length, knownListNames: response.result.records.map(record => ["Shopping", "Software to do list", "Reminders"].find(name => name.toLowerCase() === record.title?.toLowerCase()) ?? "[other list]"), returnedInputIndices: response.result.records.map(record => listIds.indexOf(record.id) + 1), errorInputIndices: response.result.recordErrors.map(error => listIds.indexOf(error.id) + 1), recordErrors: response.result.recordErrors.map(error => error.code), expectedZoneOwnerMatched: expectedZoneOwner ? true : undefined, requestTrace: response.result.requestTrace }));
+  console.log(JSON.stringify({ operation: "direct-list-lookup", requested: listIds.length, returned: response.result.records.length, returnedInputIndices: response.result.records.map(record => listIds.indexOf(record.id) + 1), errorInputIndices: response.result.recordErrors.map(error => listIds.indexOf(error.id) + 1), recordErrors: response.result.recordErrors.map(error => error.code), expectedZoneOwnerMatched: expectedZoneOwner ? true : undefined, requestTrace: response.result.requestTrace }));
   for (const listId of listIds) {
     const list = response.result.records.find(record => record.id === listId);
     if (list?.deleted || list?.isGroup) continue;
     const reminderResponse = await call("/api/apple/read", { action: "reminders", expectedGeneration: status.generation, listId, includeCompleted: false, limit: 200 });
-    console.log(JSON.stringify({ operation: "direct-open-reminders-read", inputIndex: listIds.indexOf(listId) + 1, listName: ["Shopping", "Software to do list", "Reminders"].find(name => name.toLowerCase() === list?.title?.toLowerCase()) ?? "[other list]", reminderRecords: reminderResponse.result.records.length, openReminders: reminderResponse.result.records.filter(record => record.completed === false && !record.deleted).length, completedReminders: reminderResponse.result.records.filter(record => record.completed === true).length, paginationComplete: reminderResponse.result.paginationComplete, recordErrors: reminderResponse.result.recordErrors.map(error => error.code), relatedRecordCounts: reminderResponse.result.auxiliaryRecordCounts, requestTrace: reminderResponse.result.requestTrace, writesEnabled: false }));
+    console.log(JSON.stringify({ operation: "direct-open-reminders-read", inputIndex: listIds.indexOf(listId) + 1, reminderRecords: reminderResponse.result.records.length, openReminders: reminderResponse.result.records.filter(record => record.completed === false && !record.deleted).length, completedReminders: reminderResponse.result.records.filter(record => record.completed === true).length, paginationComplete: reminderResponse.result.paginationComplete, recordErrors: reminderResponse.result.recordErrors.map(error => error.code), relatedRecordCounts: reminderResponse.result.auxiliaryRecordCounts, requestTrace: reminderResponse.result.requestTrace, writesEnabled: false }));
   }
-} else if (command === "catalogue") {
-  const { scanCatalogue, mergeCatalogueChoices, selectableList } = await import("../../src/app/catalogue-scan.ts");
-  const restored = await call("/api/apple/read", { action: "saved-lists", expectedGeneration: status.generation });
-  const started = Date.now();
-  let catalogue = restored.result.records, token = null, readPages = 0; const visited = new Set(); const deadline = Date.now() + 30_000 * Math.ceil(pages / 25);
-  while (readPages < pages && Date.now() < deadline && catalogue.filter(selectableList).length < 3) {
-    const result = await scanCatalogue({ generation: status.generation, discover: readPages === 0, startToken: token, initialCatalogue: catalogue, visitedTokens: visited, maxPages: pages - readPages, timeBudgetMs: deadline - Date.now(), signal: new AbortController().signal,
-      read: async (body, signal) => (await call("/api/apple/read", body.action === "lists" ? { ...body, limit: 200, ...(process.argv[4] === "oldest" ? { reverse: false } : {}) } : body, signal)).result,
-      onPage: page => { readPages++; catalogue = mergeCatalogueChoices(catalogue, page); token = page.continuation; console.log(JSON.stringify({ operation: "catalogue", page: readPages, pageRecords: page.records.length, selectableLists: catalogue.filter(selectableList).length, recordErrors: page.recordErrors.length, paginationComplete: page.paginationComplete })); },
-    });
-    if (!["found", "page-limit"].includes(result.reason) || !token) { console.log(JSON.stringify({ stopped: result.reason, pages: readPages, selectableLists: catalogue.filter(selectableList).length })); break; }
-  }
-  console.log(JSON.stringify({ operation: "catalogue-summary", elapsedMs: Date.now() - started, pages: readPages, selectableLists: catalogue.filter(selectableList).length, morePages: !!token, writesEnabled: false }));
 } else if (command === "read-test") {
-  let continuation = null; const seen = new Set(); const deadline = Date.now() + 30_000;
-  for (let index = 0; index < 5 && Date.now() < deadline; index++) {
-    const response = await call("/api/apple/read", { action: "lists", expectedGeneration: status.generation, reverse: true, continuation, limit: 200 });
-    const page = response.result;
-    const selected = page.records.find(record => record.id.startsWith("List/") && !record.deleted && !record.isGroup);
-    console.log(JSON.stringify({ operation: "newest-catalogue", page: index + 1, records: page.records.length, selectableListFound: !!selected, recordErrors: page.recordErrors.length, paginationComplete: page.paginationComplete }));
-    if (page.recordErrors.length) break;
-    if (selected) {
-      const read = await call("/api/apple/read", { action: "reminders", expectedGeneration: status.generation, listId: selected.id, includeCompleted: option !== "open", limit: 200 });
-      console.log(JSON.stringify({ operation: "bounded-test-list-read", openOnly: option === "open", records: read.result.records.length, reminderRecords: read.result.records.filter(record => record.id.startsWith("Reminder/") && !record.deleted).length, completedRecords: read.result.records.filter(record => record.completed === true).length, openRecords: read.result.records.filter(record => record.completed === false && !record.deleted).length, unknownCompletionRecords: read.result.records.filter(record => record.completed == null && !record.deleted).length, titlesPresent: read.result.records.filter(record => typeof record.title === "string" && record.title.length > 0).length, recordErrors: read.result.recordErrors.length, paginationComplete: read.result.paginationComplete, relatedRecordCounts: read.result.auxiliaryRecordCounts, writesEnabled: read.writesEnabled }));
-      break;
-    }
-    if (page.paginationComplete || !page.continuation || seen.has(page.continuation)) break;
-    seen.add(page.continuation); continuation = page.continuation;
-    await new Promise(resolve => setTimeout(resolve, 250));
-  }
-} else if (command === "discover" || command === "other-zones") {
-  const result = await call("/api/apple/read", { action: command === "discover" ? "discover" : "probe-other-zones", expectedGeneration: status.generation });
+  const response = await call("/api/apple/read", { action: "current-lists", expectedGeneration: status.generation });
+  const selected = response.result.records.find(record => !record.deleted && !record.isGroup);
+  if (!selected) throw new Error("No selectable reminder list is available.");
+  const read = await call("/api/apple/read", { action: "reminders", expectedGeneration: status.generation, listId: selected.id, includeCompleted: option !== "open", limit: 200 });
+  console.log(JSON.stringify({ operation: "bounded-test-list-read", openOnly: option === "open", records: read.result.records.length, reminderRecords: read.result.records.filter(record => record.id.startsWith("Reminder/") && !record.deleted).length, completedRecords: read.result.records.filter(record => record.completed === true).length, openRecords: read.result.records.filter(record => record.completed === false && !record.deleted).length, recordErrors: read.result.recordErrors.length, paginationComplete: read.result.paginationComplete, relatedRecordCounts: read.result.auxiliaryRecordCounts, writesEnabled: read.writesEnabled }));
+} else if (command === "discover") {
+  const result = await call("/api/apple/read", { action: "discover", expectedGeneration: status.generation });
   console.log(JSON.stringify({ operation: "discover", ...result }));
 }
