@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { AppError } from "../errors.ts";
+import { omitField } from "../lib/omit-field.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
 import { AppleSessionRepository, mergeSavedLists, type AppleSession, type AllOpenScan, type ResumeFence } from "../persistence/apple-sessions.ts";
 import { CloudKitRateLimitedError, CloudKitRemindersClient, normalizeList, normalizeReminder, type CloudKitPage } from "../icloud/cloudkit.ts";
@@ -60,7 +61,7 @@ export class AppleConnectionService {
     const gates = appleGates(this.env);
     const session = await new AppleSessionRepository(this.env, this.owner).status();
     const readsAvailable = gates.enabled && session.transportReady;
-    const { liveReadValidated: _readValidation, ...connection } = session;
+    const connection = omitField(session, "liveReadValidated");
     return { ...connection, listDiscovery: { strategy: "direct", liveValidated: false, experimental: true }, gates, connected: readsAvailable, writeEnabled: false, phase: "read-only", capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: false, update: false, complete: false, reopen: false, delete: false }, validation: { fullProductAcceptance: false }, mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_all_open_reminders"], message: !gates.enabled ? appleDisabledMessage(gates) : session.state === "READY" ? "Read-only reminder tools are available. Use get_all_open_reminders for current open reminders across all lists. Known-list reminder reads use a current authorized lookup without catalogue scanning. List discovery queries current private-zone Lists directly, without historical synchronization. Reminder changes remain disabled." : session.state === "DEVICE_APPROVAL_PENDING" ? (session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again.") : "Connect your Apple account through the private Site's secure connection form." };
   }
   async disconnect() { return await new AppleSessionRepository(this.env, this.owner).disconnect(); }
@@ -90,7 +91,7 @@ export class AppleConnectionService {
     const found = await client.queryAllLists();
     if (!found.complete) throw new AppError("UNSUPPORTED_FEATURE", "Direct list discovery did not finish within its safe limits or returned record errors. The previous snapshot is preserved. Retry a refresh; if the error persists, direct discovery is not supported for this account or exceeds the current limits.", 409);
     const now = Date.now();
-    const records = found.lists.map(({ raw: _raw, ...list }) => list);
+    const records = found.lists.map(list => omitField(list, "raw"));
     const savedLists = mergeSavedLists([], records, now);
     return { records, pagesRead: found.pagesRead, session: { ...session,
       connection: { ...session.connection, remindersZoneOwner: client.remindersZoneOwner },
@@ -158,7 +159,7 @@ export class AppleConnectionService {
         queried = true;
         records = page.records.flatMap(record => {
           if (!("recordType" in record) || record.recordType !== "Reminder" || record.deleted) return [];
-          const { raw: _raw, ...reminder } = normalizeReminder(record, client.remindersZoneOwner);
+          const reminder = omitField(normalizeReminder(record, client.remindersZoneOwner), "raw");
           return reminder.deleted || reminder.completed === true ? [] : [reminder];
         });
         if (records.length > 200) throw new AppError("PROTOCOL_CHANGED", "Apple returned more reminders than the all-open page budget.");
@@ -282,7 +283,7 @@ export class AppleConnectionService {
         const records = [...found.records.map(record => {
           if (record.deleted) return { id: record.recordName, deleted: true };
           if (!("recordType" in record) || record.recordType !== "List") throw new AppError("PROTOCOL_CHANGED", "Apple returned an unexpected record in the list lookup.");
-          const { raw, ...summary } = normalizeList(record, false); return summary;
+          return omitField(normalizeList(record, false), "raw");
         }), ...found.recordErrors.flatMap(error => error.recordName && ["UNKNOWN_ITEM", "NOT_FOUND"].includes(error.serverErrorCode) ? [{ id: error.recordName, deleted: true }] : [])];
         savedLists = mergeSavedLists(savedLists, records);
         result = { records, recordErrors: found.recordErrors.map(error => ({ id: error.recordName, code: error.serverErrorCode })), complete: found.complete, paginationComplete: true, continuation: null, pendingReason: found.complete ? null : "record_errors", scope: "controlled-lookup", auxiliaryRecordCounts: {}, auxiliaryDetailsIncluded: false, unrefreshedLists: input.action === "refresh-saved-lists" ? Math.max(0, saved.session.savedLists!.length - listIds.length) : 0 };

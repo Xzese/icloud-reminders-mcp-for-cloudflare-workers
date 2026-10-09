@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { z } from "zod";
 import { AppleConnectionService, ControlledRead } from "../auth/service.ts";
 import { publicError } from "../errors.ts";
+import { omitField } from "../lib/omit-field.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
 
 export async function handleMCP(request: Request, env: RuntimeEnv, owner: string) {
@@ -19,7 +20,7 @@ export async function handleMCP(request: Request, env: RuntimeEnv, owner: string
       // Return normalized reminder fields. Raw CloudKit records/traces can carry
       // signed asset links or opaque cursors and stay in the controlled UI.
       const records = (page.records as Record<string, unknown>[]).filter(record => args.action !== "saved-lists" || (!record.deleted && !record.isGroup)).map(record => {
-        const { appleRecord: _appleRecord, ...normalized } = record; return normalized;
+        return omitField(record, "appleRecord");
       });
       const result = { generation: response.generation, records, complete: page.complete, paginationComplete: page.paginationComplete,
         continuation: page.continuation, pendingReason: page.pendingReason, listId: page.listId,
@@ -39,7 +40,7 @@ export async function handleMCP(request: Request, env: RuntimeEnv, owner: string
       const generation = args.expectedGeneration ?? (await apple.status()).generation;
       const response = await apple.readAllOpenForMCP(generation, args.continuation);
       const page = response.result;
-      const result = { ...page, generation: response.generation, records: page.records.map(record => { const { appleRecord: _appleRecord, ...normalized } = record; return normalized; }), writesEnabled: false };
+      const result = { ...page, generation: response.generation, records: page.records.map(record => omitField(record, "appleRecord")), writesEnabled: false };
       return { structuredContent: result, content: [{ type: "text" as const, text: JSON.stringify(result) }] };
     } catch (error) {
       const result = publicError(error, crypto.randomUUID());

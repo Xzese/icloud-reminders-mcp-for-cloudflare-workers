@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { AppleSessionRepository, mergeSavedLists, type AppleSession } from "../src/persistence/apple-sessions.ts";
 import { AppleConnectionService, ControlledRead } from "../src/auth/service.ts";
 import { AppError } from "../src/errors.ts";
+import { omitField } from "../src/lib/omit-field.ts";
 import { CookieJar } from "../src/transport/cookie-jar.ts";
 import { Envelopes } from "../src/crypto/envelopes.ts";
 import { loginAssurance } from "../src/auth/apple/policy.ts";
@@ -214,7 +215,7 @@ test("absolute login expiry invalidates old policy sessions and cannot slide dur
   assert.equal((await repository.status()).state, "DISCONNECTED");
   assert.equal(db.sqlite.prepare("SELECT envelope FROM apple_session_state WHERE owner_id = ?").get(owner)?.envelope, null);
   const next = await repository.begin((await repository.status()).generation); await repository.commit(next, appleSession(), "READY");
-  const { login: _old, ...legacy } = appleSession();
+  const legacy = omitField(appleSession(), "login");
   const old = await repository.envelopes.encrypt(legacy, { ...context, generation: next.generation });
   db.sqlite.prepare("UPDATE apple_session_state SET envelope = ? WHERE owner_id = ?").run(JSON.stringify(old), owner);
   await assert.rejects(repository.load(), (e: any) => e.code === "REAUTH_REQUIRED");

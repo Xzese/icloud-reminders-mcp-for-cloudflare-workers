@@ -5,7 +5,7 @@ import { applicationRoute } from "./api/router";
 import type { RuntimeEnv } from "./platform/sites";
 import credentialJS from "virtual:apple-credential-script";
 
-export default {
+const worker = {
   async fetch(request: Request, env: Cloudflare.Env & RuntimeEnv, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
     const appResponse = await applicationRoute(request, env, credentialJS);
     if (appResponse) return appResponse;
@@ -42,3 +42,4 @@ export default {
     return secured;
   },
 };
+export default worker;
