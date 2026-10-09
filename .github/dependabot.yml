@@ -7,7 +7,12 @@ updates:
     groups:
       routine-npm:
         update-types: [minor, patch]
+    open-pull-requests-limit: 10
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    groups:
+      routine-actions:
+        update-types: [minor, patch]
+    open-pull-requests-limit: 10

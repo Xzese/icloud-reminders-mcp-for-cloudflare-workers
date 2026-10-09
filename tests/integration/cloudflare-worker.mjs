@@ -1,6 +1,6 @@
 // Smoke journey through the built standalone edge. Synthetic JWT/JWKS only.
-import { Miniflare, Log, LogLevel, createFetchMock } from "miniflare";
-import { fetch as mockFetch } from "undici";
+import { Miniflare, Log, LogLevel } from "miniflare";
+import { fetch as mockFetch, MockAgent } from "undici";
 import { generateKeyPair, exportJWK, SignJWT } from "jose";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
@@ -19,7 +19,7 @@ const owner = "synthetic-access-owner";
 const { publicKey, privateKey } = await generateKeyPair("RS256");
 const jwk = { ...await exportJWK(publicKey), alg: "RS256", use: "sig", kid: "synthetic-key" };
 const sign = sub => new SignJWT({ email: "synthetic@example.invalid" }).setProtectedHeader({ alg: "RS256", kid: jwk.kid }).setSubject(sub).setIssuer(issuer).setAudience("synthetic-audience").setIssuedAt().setExpirationTime("5m").sign(privateKey);
-const mock = createFetchMock(); mock.disableNetConnect();
+const mock = new MockAgent(); mock.disableNetConnect();
 mock.get(issuer).intercept({ path: "/cdn-cgi/access/certs", method: "GET" }).reply(200, { keys: [jwk] }).persist();
 const paths = (await readdir(server, { recursive: true, withFileTypes: true })).filter(entry => entry.isFile() && /\.(?:js|mjs)$/.test(entry.name)).map(entry => join(entry.parentPath, entry.name));
 const worker = new Miniflare({
