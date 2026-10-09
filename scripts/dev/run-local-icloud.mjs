@@ -4,10 +4,11 @@ import { fetch as nodeFetch } from "undici";
 import { mkdir, readFile, readdir, writeFile, chmod, appendFile, stat, rename } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import { resolve, join } from "node:path";
-import { localAppleHeaders, summarizeAppleResponse } from "./local-icloud-observation.mjs";
+import { localAppleHeaders, summarizeAppleResponse, summarizeAppleFailure } from "./local-icloud-observation.mjs";
 import { createLocalPushRelay } from "./local-icloud-push.mjs";
 
 const root = resolve(new URL("../..", import.meta.url).pathname);
+if (process.argv.length > 2) throw new Error("Use npm run dev:icloud.");
 const state = join(root, ".sites-runtime/local-icloud");
 await mkdir(state, { recursive: true, mode: 0o700 });
 await chmod(state, 0o700);
@@ -52,15 +53,24 @@ const worker = new Miniflare({
         const fixed = ["idmsa.apple.com", "setup.icloud.com", "www.icloud.com"].includes(url.hostname);
         const cloudkit = /^p\d{1,3}-ckdatabasews\.icloud\.com$/.test(url.hostname) && (/^\/database\/1\/com\.apple\.reminders\/production\/private(?:\/|$)/.test(url.pathname) || /^\/database\/1\/com\.apple\.reminders\/production\/shared\/(?:zones\/list|records\/lookup)$/.test(url.pathname));
         if (url.protocol !== "https:" || url.username || url.password || url.port || (!fixed && !cloudkit)) return new WorkerResponse("Unsupported local test endpoint.", { status: 403 });
-        const response = await nodeFetch(url, { method: request.method, headers: localAppleHeaders(request.headers), body: request.body, duplex: "half", redirect: "manual", signal: AbortSignal.any([request.signal, AbortSignal.timeout(8000)]) });
-        const reader = response.body?.getReader(); const chunks = []; let total = 0;
+        const startedAt = Date.now(), deadline = AbortSignal.timeout(8000);
+        let total = 0, stage = "headers", status = null;
         try {
-          if (reader) for (;;) { const next = await reader.read(); if (next.done) break; total += next.value.length; if (total > 1_048_576) throw new Error("Local response byte budget exceeded."); chunks.push(next.value); }
-        } finally { if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); } }
-        const bytes = Buffer.concat(chunks);
-        let body; if (response.headers.get("content-type")?.includes("json")) { try { body = JSON.parse(bytes.toString("utf8")); } catch { /* Only status is observed. */ } }
-        await observe(summarizeAppleResponse(url, response.status, body));
-        return new WorkerResponse(request.method === "HEAD" || [204, 205, 304].includes(response.status) ? null : bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+          const response = await nodeFetch(url, { method: request.method, headers: localAppleHeaders(request.headers), body: request.body, duplex: "half", redirect: "manual", signal: AbortSignal.any([request.signal, deadline]) });
+          status = response.status; stage = "body";
+          const reader = response.body?.getReader(); const chunks = [];
+          try {
+            if (reader) for (;;) { const next = await reader.read(); if (next.done) break; total += next.value.length; if (total > 1_048_576) throw Object.assign(new Error("Local response byte budget exceeded."), { code: "LOCAL_RESPONSE_BYTE_BUDGET" }); chunks.push(next.value); }
+          } finally { if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); } }
+          const bytes = Buffer.concat(chunks);
+          let body; if (response.headers.get("content-type")?.includes("json")) { try { body = JSON.parse(bytes.toString("utf8")); } catch { /* Only status is observed. */ } }
+          stage = "observation";
+          await observe({ ...summarizeAppleResponse(url, response.status, body), bytesRead: total, elapsedMs: Date.now() - startedAt });
+          return new WorkerResponse(request.method === "HEAD" || [204, 205, 304].includes(response.status) ? null : bytes, { status: response.status, statusText: response.statusText, headers: response.headers });
+        } catch (error) {
+          await observe(summarizeAppleFailure(url, { stage, status, bytesRead: total, elapsedMs: Date.now() - startedAt, timeout: deadline.aborted, aborted: request.signal.aborted, error }));
+          throw error;
+        }
       },
     },
   ],
@@ -71,6 +81,6 @@ try {
   await worker.ready;
   console.log(`Local Worker ready: ${origin}/`);
   console.log("Lists are retrieved directly on refresh; no historical or scheduled catalogue work.");
-  console.log("Separate encrypted local session; reminder writes disabled. Diagnostics contain metadata and counts only.");
+  console.log("Separate encrypted local session; reminder creation, editing, completion, reopening and deletion are available after sign-in. Diagnostics contain metadata and counts only.");
 } catch (error) { push.close(); await worker.dispose(); throw error; }
 for (const signal of ["SIGINT", "SIGTERM"]) process.once(signal, async () => { push.close(); await worker.dispose(); await logQueue; process.exit(0); });

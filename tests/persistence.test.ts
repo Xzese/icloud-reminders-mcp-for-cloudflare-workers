@@ -174,6 +174,29 @@ test("ready reads claim the same short lease before committing refreshed cookies
   assert.equal((await repository.status()).version, read.version + 1);
 });
 
+test("session restoration follows bounded same-generation progress without adopting a replacement account", async () => {
+  const db = new SQLiteD1(); const repository = appleRepo(db);
+  const session = appleSession(); const setup = await repository.begin(0); await repository.commit(setup, session, "READY");
+  const advanced = { ...session, savedLists: mergeSavedLists([], [{ id: "List/A", title: "A" }, { id: "List/B", title: "B" }, { id: "List/C", title: "C" }]) };
+  const advance = async () => { db.afterStatement = null; const saved = await repository.load(); const lease = await repository.claimRead(saved.fence.generation, saved.fence.version); await repository.commitResume(lease, advanced, "READY"); };
+  try {
+    db.afterStatement = async sql => { if (sql.startsWith("SELECT generation, version") && sql.includes("envelope")) await advance(); };
+    const restored = await repository.load(); assert.equal(restored.session.savedLists?.length, 3);
+    db.afterStatement = async sql => { if (sql.startsWith("SELECT generation, version") && !sql.includes("envelope")) await advance(); };
+    const status = await repository.status(); assert.equal(status.state, "READY"); assert.equal(status.version, (await repository.load()).fence.version);
+    let attempts = 0;
+    db.afterStatement = async sql => { if (sql.startsWith("SELECT generation, version") && sql.includes("envelope")) { attempts++; db.sqlite.prepare("UPDATE apple_session_state SET version = version + 1 WHERE owner_id = ?").run(owner); } };
+    await assert.rejects(repository.load(), (error: unknown) => error instanceof AppError && error.code === "CONFLICT" && error.retryable);
+    assert.equal(attempts, 3); db.afterStatement = null;
+    db.afterStatement = async sql => {
+      if (!sql.startsWith("SELECT generation, version") || !sql.includes("envelope")) return;
+      db.afterStatement = null; await repository.disconnect(); const next = await repository.begin((await repository.status()).generation); await repository.commit(next, appleSession(), "READY");
+    };
+    await assert.rejects(repository.load(), (error: unknown) => error instanceof AppError && error.code === "CONFLICT");
+    assert.equal((await repository.status()).state, "READY"); assert.notEqual((await repository.load()).fence.generation, setup.generation);
+  } finally { db.afterStatement = null; db.sqlite.close(); }
+});
+
 test("tampered ciphertext fails closed and an invalid decrypted snapshot is invalidated", async () => {
   const db = new SQLiteD1(); const envelopes = key(); const repository = appleRepo(db, owner, envelopes);
   const setup = await repository.begin(0);

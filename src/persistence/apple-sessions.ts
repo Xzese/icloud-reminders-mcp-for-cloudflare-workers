@@ -174,15 +174,16 @@ export class AppleSessionRepository {
       .bind(this.owner, ACCOUNT).first<{ generation: number; version: number; state: string; action: string | null; next_attempt_at: number; transaction_expires_at: number | null }>();
     const currentState = row?.state === "CONNECTING" && (!row.transaction_expires_at || row.transaction_expires_at <= Date.now()) ? "DISCONNECTED" : row?.state;
     const validState: AppleSessionStatus["state"] = currentState && ["CONNECTING", "READY", "DEVICE_APPROVAL_PENDING"].includes(currentState) ? currentState as AppleSessionStatus["state"] : "DISCONNECTED";
-    const action = row?.action && APPROVAL_ACTIONS.includes(row.action as ApprovalAction) ? row.action as ApprovalAction : null;
-    let expiresAt: number | null = null;
     if (validState === "READY" || validState === "DEVICE_APPROVAL_PENDING") {
       try {
         const saved = await this.load();
-        if (saved.fence.generation !== row?.generation || saved.fence.version !== row.version) throw new AppError("CONFLICT", "The Apple session changed. Refresh connection.", 409);
-        expiresAt = saved.session.login.expiresAt;
+        // Use the restored row's metadata, rather than comparing it with an
+        // earlier status SELECT while a concurrent operation advances the version.
+        return { ...saved.fence, state: saved.state, action: saved.action,
+          nextAttemptAt: saved.session.pcs.nextAttemptAt, transportReady: saved.state === "READY",
+          liveReadValidated: false, expiresAt: saved.session.login.expiresAt };
       } catch (error) {
-        if (error instanceof AppError && ["REAUTH_REQUIRED", "AUTH_EXPIRED", "NOT_CONNECTED"].includes(error.code)) { if (retry >= 1) throw new AppError("CONFLICT", "The Apple session changed. Refresh connection.", 409); return this.status(retry + 1); }
+        if (error instanceof AppError && ["REAUTH_REQUIRED", "AUTH_EXPIRED", "NOT_CONNECTED", "CONFLICT"].includes(error.code)) { if (retry >= 2) throw new AppError("CONFLICT", "The Apple session changed. Refresh connection.", 409); return this.status(retry + 1); }
         throw error;
       }
     }
@@ -190,11 +191,11 @@ export class AppleSessionRepository {
       generation: row?.generation ?? 0,
       version: row?.version ?? 0,
       state: validState,
-      action: validState === "DEVICE_APPROVAL_PENDING" ? action : null,
+      action: null,
       nextAttemptAt: row?.next_attempt_at ?? 0,
-      transportReady: validState === "READY",
+      transportReady: false,
       liveReadValidated: false,
-      expiresAt,
+      expiresAt: null,
     };
   }
 
@@ -251,12 +252,15 @@ export class AppleSessionRepository {
 
   private invalidateSnapshot(fence: SessionFence) { return this.invalidate(fence); }
 
-  async load(): Promise<{ session: AppleSession; fence: SessionFence }> {
+  async load() { return this.loadSnapshot(); }
+
+  private async loadSnapshot(retry = 0, generation?: number): Promise<{ session: AppleSession; fence: SessionFence; state: AppleSessionState; action: ApprovalAction | null }> {
     const row = await this.db.prepare("SELECT generation, version, state, action, next_attempt_at, envelope, transaction_id, transaction_expires_at, resume_id, resume_expires_at FROM apple_session_state WHERE owner_id = ? AND account_id = ?")
       .bind(this.owner, ACCOUNT).first<StateRow>();
     if (!row || (row.state !== "READY" && row.state !== "DEVICE_APPROVAL_PENDING")) {
       throw new AppError("NOT_CONNECTED", "Connect an Apple account before continuing.", 409);
     }
+    if (generation !== undefined && row.generation !== generation) throw new AppError("CONFLICT", "The Apple account connection changed. Refresh status before continuing.", 409, true);
     const fence = { generation: row.generation, version: row.version };
     if (!row.envelope || row.transaction_id !== null) {
       await this.invalidateSnapshot(fence);
@@ -283,10 +287,15 @@ export class AppleSessionRepository {
     catch (error) { await this.invalidateSnapshot(fence); throw error; }
     const current = await this.db.prepare("SELECT 1 AS active FROM apple_session_state WHERE owner_id = ? AND account_id = ? AND generation = ? AND version = ? AND state IN ('READY', 'DEVICE_APPROVAL_PENDING')")
       .bind(this.owner, ACCOUNT, fence.generation, fence.version).first<{ active: number }>();
-    if (!current) throw new AppError("CONFLICT", "The Apple session changed while it was being restored. Retry the request.", 409);
+    if (!current) {
+      // Retry restoration only, never an Apple request or mutation. Pin the
+      // original generation so reconnect/disconnect cannot silently switch it.
+      if (retry < 2) return this.loadSnapshot(retry + 1, fence.generation);
+      throw new AppError("CONFLICT", "The Apple session is busy updating. Retry the request.", 409, true);
+    }
     try { requireCurrentLogin(parsed.data.login); }
     catch (error) { await this.invalidateSnapshot(fence); throw error; }
-    return { session: parsed.data, fence };
+    return { session: parsed.data, fence, state: row.state, action: row.state === "READY" ? null : row.action as ApprovalAction };
   }
 
   async claimResume(expectedGeneration: number, expectedVersion?: number): Promise<ResumeFence> {
@@ -333,6 +342,15 @@ export class AppleSessionRepository {
     try { requireCurrentLogin(saved.session.login); }
     catch (error) { await this.invalidate(row); throw error; }
     return { generation: row.generation, version: row.version, resumeId, expiresAt };
+  }
+
+  async assertWriteLease(fence: ResumeFence) {
+    // Recheck immediately before dispatch. Reads used to prepare the write must
+    // not consume the remaining lease or let a disconnect/reconnect go unnoticed.
+    const now = Date.now();
+    const row = await this.db.prepare("SELECT 1 AS active FROM apple_session_state WHERE owner_id = ? AND account_id = ? AND generation = ? AND version = ? AND state = 'READY' AND transaction_id IS NULL AND resume_id = ? AND resume_expires_at > ?")
+      .bind(this.owner, ACCOUNT, fence.generation, fence.version, fence.resumeId, now + 10_000).first<{ active: number }>();
+    if (!row) throw new AppError("CONFLICT", "The Apple session changed or the preparation budget expired. Refresh before retrying; no write was sent.", 409, true);
   }
 
   async commitResume(fence: ResumeFence, session: AppleSession, state: AppleSessionState, action?: ApprovalAction) {

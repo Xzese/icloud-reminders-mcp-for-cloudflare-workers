@@ -252,6 +252,16 @@
       "noticeFiles": []
     },
     {
+      "name": "undici",
+      "version": "7.29.1",
+      "location": "node_modules/@cloudflare/vite-plugin/node_modules/undici",
+      "license": "MIT",
+      "developmentOnly": true,
+      "noticeFiles": [
+        "LICENSE"
+      ]
+    },
+    {
       "name": "workerd",
       "version": "1.20261001.1",
       "location": "node_modules/@cloudflare/vite-plugin/node_modules/workerd",
@@ -271,7 +281,7 @@
     },
     {
       "name": "@cloudflare/workerd-darwin-arm64",
-      "version": "1.20260515.1",
+      "version": "1.20260730.1",
       "location": "node_modules/@cloudflare/workerd-darwin-arm64",
       "license": "Apache-2.0",
       "developmentOnly": true,
@@ -279,7 +289,7 @@
     },
     {
       "name": "@cloudflare/workers-types",
-      "version": "5.20261001.1",
+      "version": "5.20261006.1",
       "location": "node_modules/@cloudflare/workers-types",
       "license": "MIT OR Apache-2.0",
       "developmentOnly": true,
@@ -653,6 +663,16 @@
       "name": "ajv-formats",
       "version": "3.0.1",
       "location": "node_modules/@modelcontextprotocol/sdk/node_modules/ajv-formats",
+      "license": "MIT",
+      "developmentOnly": false,
+      "noticeFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "raw-body",
+      "version": "3.0.2",
+      "location": "node_modules/@modelcontextprotocol/sdk/node_modules/raw-body",
       "license": "MIT",
       "developmentOnly": false,
       "noticeFiles": [
@@ -2436,6 +2456,16 @@
       "name": "content-type",
       "version": "2.1.0",
       "location": "node_modules/body-parser/node_modules/content-type",
+      "license": "MIT",
+      "developmentOnly": false,
+      "noticeFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "raw-body",
+      "version": "3.0.2",
+      "location": "node_modules/body-parser/node_modules/raw-body",
       "license": "MIT",
       "developmentOnly": false,
       "noticeFiles": [
@@ -4832,7 +4862,7 @@
     },
     {
       "name": "miniflare",
-      "version": "4.20260515.0",
+      "version": "4.20260730.0",
       "location": "node_modules/miniflare",
       "license": "MIT",
       "developmentOnly": true,
@@ -4840,7 +4870,7 @@
     },
     {
       "name": "undici",
-      "version": "7.24.8",
+      "version": "7.28.0",
       "location": "node_modules/miniflare/node_modules/undici",
       "license": "MIT",
       "developmentOnly": true,
@@ -4850,7 +4880,7 @@
     },
     {
       "name": "ws",
-      "version": "8.18.0",
+      "version": "8.21.0",
       "location": "node_modules/miniflare/node_modules/ws",
       "license": "MIT",
       "developmentOnly": true,
@@ -5378,10 +5408,10 @@
     },
     {
       "name": "raw-body",
-      "version": "3.0.2",
+      "version": "4.0.0",
       "location": "node_modules/raw-body",
       "license": "MIT",
-      "developmentOnly": false,
+      "developmentOnly": true,
       "noticeFiles": [
         "LICENSE"
       ]
@@ -6394,7 +6424,7 @@
     },
     {
       "name": "undici",
-      "version": "7.29.1",
+      "version": "8.11.2",
       "location": "node_modules/undici",
       "license": "MIT",
       "developmentOnly": true,
@@ -6548,7 +6578,7 @@
     },
     {
       "name": "vite",
-      "version": "8.3.2",
+      "version": "8.3.3",
       "location": "node_modules/vite",
       "license": "MIT",
       "developmentOnly": true,
@@ -6778,7 +6808,7 @@
     },
     {
       "name": "workerd",
-      "version": "1.20260515.1",
+      "version": "1.20260730.1",
       "location": "node_modules/workerd",
       "license": "Apache-2.0",
       "developmentOnly": true,
@@ -6807,6 +6837,16 @@
       "license": "MIT",
       "developmentOnly": true,
       "noticeFiles": []
+    },
+    {
+      "name": "undici",
+      "version": "7.29.1",
+      "location": "node_modules/wrangler/node_modules/undici",
+      "license": "MIT",
+      "developmentOnly": true,
+      "noticeFiles": [
+        "LICENSE"
+      ]
     },
     {
       "name": "workerd",

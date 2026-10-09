@@ -15,8 +15,8 @@ export default async function Home() {
       <div className="login-icon"><Cloud size={34} aria-hidden="true" /></div><h1 id="login-title">Your reminders,<br />ready for ChatGPT.</h1><p>Connect iCloud Reminders to your private workspace and ask ChatGPT what needs doing.</p>
       <a className="signin-button" href={chatGPTSignInPath("/")} target="_top">Sign in with ChatGPT <ArrowRight size={19} aria-hidden="true" /></a>
       <ol className="login-steps"><li><span className="login-step-number">1</span>Sign in to your workspace</li><li><span className="login-step-number">2</span>Connect your Apple account</li><li><span className="login-step-number">3</span>Find your lists and preview reminders</li></ol>
-      <p className="login-note"><LockKeyhole size={15} aria-hidden="true" /> Private access. Reminders are read only.</p>
+      <p className="login-note"><LockKeyhole size={15} aria-hidden="true" /> Private access to your reminders.</p>
     </section></div>}
-    <footer className="app-footer"><span>iCloud Reminders</span><span>Unofficial integration · Read only</span></footer>
+    <footer className="app-footer"><span>iCloud Reminders</span><span>Unofficial integration</span></footer>
   </main>;
 }
