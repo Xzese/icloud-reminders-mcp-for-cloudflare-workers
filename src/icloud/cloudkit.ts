@@ -1,4 +1,5 @@
-import { AppError, requireValue as requireInput } from "../errors.ts";
+import { AppError, WriteOutcomeUnknownError, requireValue as requireInput } from "../errors.ts";
+import type { CloudKitWriteRecord } from "../reminders/writes.ts";
 import { decodeDocument } from "../reminders/crdt.ts";
 import { AppleHTTP, validatedAppleURL, appleWebHeaders } from "../transport/apple-http.ts";
 
@@ -416,7 +417,7 @@ function pageRecords(value: unknown, limit: number, absoluteLimit = MAX_PAGE_SIZ
   return { records, recordErrors };
 }
 
-function parseTopLevelError(body: Record<string, unknown>, context: { path: ReadPath; upstreamStatus: number; hasSessionCookie: boolean }): never | void {
+function parseTopLevelError(body: Record<string, unknown>, context: { path: CloudKitPath; upstreamStatus: number; hasSessionCookie: boolean }): never | void {
   const code = typeof body.serverErrorCode === "string" ? body.serverErrorCode : null;
   if (!code) return;
   const normalized = code.toUpperCase();
@@ -430,6 +431,13 @@ function parseTopLevelError(body: Record<string, unknown>, context: { path: Read
   if (["THROTTLED", "REQUEST_RATE_LIMITED", "ZONE_BUSY"].includes(normalized)) {
     throw new CloudKitRateLimitedError(null);
   }
+  if (context.path === "/records/modify") {
+    if (["CONFLICT", "SERVER_RECORD_CHANGED", "ALREADY_EXISTS"].includes(normalized)) throw new AppError("CONFLICT", "The reminder changed or its create ID already exists. Read its current state before retrying.", 409);
+    if (["UNKNOWN_ITEM", "NOT_FOUND"].includes(normalized)) throw new AppError("CONFLICT", "The reminder or its list is no longer available.", 409);
+    if (["BAD_REQUEST", "INVALID_ARGUMENTS", "VALIDATION_ERROR"].includes(normalized)) throw new AppError("PROTOCOL_CHANGED", "Apple rejected the reminder write fields. No automatic retry was attempted.");
+    // An unfamiliar error after submission is not proof that nothing was saved.
+    throw new WriteOutcomeUnknownError(String(body.recordName ?? ""));
+  }
   if (context.path === "/changes/zone" && normalized === "CHANGE_TOKEN_EXPIRED") {
     throw new AppError("RESTART_REQUIRED", "Apple expired the saved catalogue checkpoint. Restart the initial catalogue scan; your saved lists are preserved.", 409);
   }
@@ -437,6 +445,7 @@ function parseTopLevelError(body: Record<string, unknown>, context: { path: Read
 }
 
 type ReadPath = "/zones/list" | "/records/lookup" | "/records/query" | "/changes/zone";
+type CloudKitPath = ReadPath | "/records/modify";
 
 export class CloudKitRemindersClient {
   private readonly endpoint: URL;
@@ -469,7 +478,7 @@ export class CloudKitRemindersClient {
     this.params.set("dsid", connection.dsid);
   }
 
-  private async post(path: ReadPath, payload: Record<string, unknown>, database: "private" | "shared" = "private"): Promise<Record<string, unknown>> {
+  private async post(path: CloudKitPath, payload: Record<string, unknown>, database: "private" | "shared" = "private"): Promise<Record<string, unknown>> {
     requireInput(database === "private" || path === "/zones/list" || path === "/records/lookup", "The shared diagnostic only supports zone discovery and exact record lookups.");
     const body = JSON.stringify(payload);
     requireInput(new TextEncoder().encode(body).length <= MAX_REQUEST_BYTES, "The CloudKit request exceeded the byte budget.");
@@ -483,6 +492,7 @@ export class CloudKitRemindersClient {
       headers: appleWebHeaders(),
       body,
       discovered: true,
+      followRedirects: path !== "/records/modify",
     });
     if ([401, 421, 450].includes(response.status)) {
       console.warn({ event: "apple-reminders-auth-rejected", path, upstreamStatus: response.status, hasSessionCookie, reason: "http-auth-rejection" });
@@ -497,6 +507,16 @@ export class CloudKitRemindersClient {
       throw new CloudKitRateLimitedError(retry !== null && Number.isFinite(retry) ? retry : null);
     }
     if (response.status !== 200) {
+      if (path === "/records/modify") {
+        // Only a recognized rejection is a confirmed failure. Timeouts, redirects
+        // and server errors can occur after Apple commits the record.
+        if (response.status >= 400 && response.status < 500) {
+          let failure: Record<string, unknown> | null = null;
+          try { failure = object(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.bytes)), "Invalid write rejection."); } catch { /* Treat unconfirmed responses as uncertain. */ }
+          if (failure) parseTopLevelError(failure, { path, upstreamStatus: response.status, hasSessionCookie });
+        }
+        throw new WriteOutcomeUnknownError("");
+      }
       // Apple can also report expired cursors as HTTP errors. Recognition is
       // restricted to this authenticated changes endpoint and this exact code;
       // authentication, access and throttling statuses above retain precedence.
@@ -528,11 +548,45 @@ export class CloudKitRemindersClient {
       const type = record && typeof record === "object" && RECORD_TYPES.has(record.recordType) ? record.recordType as string : "other";
       recordTypes[type] = (recordTypes[type] ?? 0) + 1;
     }
-    const redactedRequest = JSON.parse(JSON.stringify(payload, (key, value) => ["recordName", "ownerRecordName", "syncToken", "continuationMarker"].includes(key) ? "[redacted]" : key === "zoneName" && value !== "Reminders" ? "[other authorized zone]" : value)) as Record<string, unknown>;
-    const redactedURL = new URL(url); redactedURL.searchParams.set("dsid", "[redacted]"); redactedURL.searchParams.set("clientId", "[redacted]");
-    this.readTrace.push({ path, url: redactedURL.href, request: redactedRequest, response: { status: response.status, returnedRecords: records.length, recordTypes, zones: zones.length, moreComing: zones.map(zone => zone?.moreComing === true ? true : zone?.moreComing === false ? false : null), syncTokenPresent: typeof result.syncToken === "string" || zones.some(zone => typeof zone?.syncToken === "string"), continuationPresent: typeof result.continuationMarker === "string", recordErrors: records.filter(record => record && typeof record.serverErrorCode === "string").length } });
+    if (path !== "/records/modify") {
+      const redactedRequest = JSON.parse(JSON.stringify(payload, (key, value) => ["recordName", "ownerRecordName", "syncToken", "continuationMarker"].includes(key) ? "[redacted]" : key === "zoneName" && value !== "Reminders" ? "[other authorized zone]" : value)) as Record<string, unknown>;
+      const redactedURL = new URL(url); redactedURL.searchParams.set("dsid", "[redacted]"); redactedURL.searchParams.set("clientId", "[redacted]");
+      this.readTrace.push({ path, url: redactedURL.href, request: redactedRequest, response: { status: response.status, returnedRecords: records.length, recordTypes, zones: zones.length, moreComing: zones.map(zone => zone?.moreComing === true ? true : zone?.moreComing === false ? false : null), syncTokenPresent: typeof result.syncToken === "string" || zones.some(zone => typeof zone?.syncToken === "string"), continuationPresent: typeof result.continuationMarker === "string", recordErrors: records.filter(record => record && typeof record.serverErrorCode === "string").length } });
+    }
     parseTopLevelError(result, { path, upstreamStatus: response.status, hasSessionCookie });
     return result;
+  }
+
+  async modifyReminder(operationType: "create" | "update", record: CloudKitWriteRecord): Promise<CloudKitRecord> {
+    requireInput(operationType === "create" || operationType === "update", "Only reminder creation and editing are supported.");
+    requireInput(this.owner !== undefined, "Discover the authenticated Reminders zone before writing.");
+    requireInput(record.recordType === "Reminder" && record.recordName.length <= 255, "Only bounded Reminder records can be written.");
+    requestedRecordName(record.recordName, ["Reminder"]);
+    const allowedFields = new Set(["TitleDocument", "NotesDocument", "Priority", "Flagged", "DueDate", "TimeZone", "AllDay", "LastModifiedDate", "ResolutionTokenMap", ...(operationType === "create" ? ["Completed", "CompletionDate", "CreationDate", "Deleted", "Imported", "List"] : [])]);
+    requireInput(Object.keys(record.fields).length > 0 && Object.keys(record.fields).every(key => allowedFields.has(key)), "The reminder write contains unsupported fields.");
+    if (operationType === "update") requireInput(typeof record.recordChangeTag === "string" && record.recordChangeTag.length > 0 && record.recordChangeTag.length <= 512 && record.parent === undefined, "Reminder edits require an exact change tag and cannot move lists.");
+    else requireInput(record.recordChangeTag === undefined && record.parent?.recordName.startsWith("List/"), "Reminder creation requires its list parent.");
+    const payload = { zoneID: this.requestZone, atomic: true, operations: [{ operationType, record }] };
+    // Pre-dispatch bounds are validation errors, not ambiguous write outcomes.
+    requireInput(new TextEncoder().encode(JSON.stringify(payload)).length <= MAX_REQUEST_BYTES, "The reminder write exceeded its byte budget.");
+    try {
+      const result = await this.post("/records/modify", payload);
+      const page = pageRecords(result.records, 1, 1, this.expectedOwner);
+      if (page.recordErrors.length) {
+        requireValue(page.recordErrors.length === 1 && page.recordErrors[0].recordName === record.recordName && page.records.length === 0, "Apple returned an unrelated write error.");
+        parseTopLevelError({ serverErrorCode: page.recordErrors[0].serverErrorCode, recordName: record.recordName }, { path: "/records/modify", upstreamStatus: 200, hasSessionCookie: this.http.jar.header(this.endpoint).length > 0 });
+      }
+      requireValue(page.records.length === 1, "Apple omitted the reminder write confirmation.");
+      const confirmed = page.records[0];
+      requireValue("recordType" in confirmed && confirmed.recordType === "Reminder" && confirmed.recordName === record.recordName && !confirmed.deleted && typeof confirmed.recordChangeTag === "string" && confirmed.recordChangeTag.length > 0, "Apple returned an invalid reminder write confirmation.");
+      if (operationType === "update") requireValue(confirmed.recordChangeTag !== record.recordChangeTag, "Apple did not advance the reminder version.");
+      return confirmed;
+    } catch (error) {
+      if (error instanceof AppError && ["REAUTH_REQUIRED", "FORBIDDEN", "RATE_LIMITED", "CONFLICT"].includes(error.code)) throw error;
+      // Explicit bad-field rejections above are also definite failures.
+      if (error instanceof AppError && error.code === "PROTOCOL_CHANGED" && error.message === "Apple rejected the reminder write fields. No automatic retry was attempted.") throw error;
+      throw new WriteOutcomeUnknownError(record.recordName);
+    }
   }
 
   async listZones(): Promise<CloudKitZoneDiscovery> {

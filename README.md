@@ -6,7 +6,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT License"></a>
 </p>
 
-A read-only remote MCP server for your iCloud Reminders, with a private connection dashboard.
+A remote MCP server for your iCloud Reminders, with a private connection dashboard. Reads are
+enabled after connecting; reminder creation and editing require a separate operator opt-in.
 Deploy it through **ChatGPT Sites** or to your own **Cloudflare Worker** protected by Cloudflare
 Access and Managed OAuth. No containers, Python runtime, KV namespace or Durable Objects are required.
 
@@ -17,12 +18,14 @@ are fetched from Apple when requested and are not cached in D1.
 **Experimental, unofficial integration.** This project uses Apple's undocumented web protocols,
 not Sign in with Apple or an official Reminders API. The login page is served by your deployment;
 you must trust its browser code with your password input. Cryptographic reference tests are not an
-independent security audit. Creating, updating, completing and deleting reminders are disabled.
+independent security audit. Creating and editing are experimental and disabled by default.
+Completing, reopening and deleting reminders remain unavailable.
 
 ## Table of contents
 
 - [Public source, private deployments](#public-source-private-deployments)
 - [Tools](#tools)
+- [Create and edit access](#create-and-edit-access)
 - [Resources and configuration](#resources-and-configuration)
 - [Local setup](#local-setup)
 - [ChatGPT Sites setup](#chatgpt-sites-setup)
@@ -59,12 +62,36 @@ Review Git history before publishing a repository that previously contained priv
 | `get_reminder_lists` | Start/resume catalogue synchronization, then return discovered current selectable lists. |
 | `get_reminders` | Synchronize the catalogue, then fetch one current page for a `listId`; open reminders by default. |
 | `get_all_open_reminders` | Synchronize the catalogue, then fetch open reminders across every discovered selectable list. |
+| `create_reminder` | Create one open reminder using a stable UUID `idempotencyKey`; requires write opt-in. |
+| `update_reminder` | Edit specified fields of one open reminder using its current `recordChangeTag`; requires write opt-in. |
 
 Tools return `structuredContent` plus a text copy for client compatibility. Use the IDs returned
 by `get_reminder_lists`. `get_reminders` accepts `includeCompleted`, `limit` (1–200) and its returned
 `continuation`. An all-open result with `complete: false` may include a separate opaque continuation;
 call `get_all_open_reminders` again with that value and combine the returned records. Inspect errors
 before retrying and respect any `retryAfterSeconds`. A partial result is not the entire collection.
+
+## Create and edit access
+
+Writes default to disabled in both deployment modes and the local launcher. After reviewing
+[the write protocol and limitations](docs/write-access.md), set the runtime variable
+`LIVE_APPLE_WRITES_APPROVED=controlled-create-edit-v1` alongside the two existing Apple login
+approvals. Set it through Sites' private runtime configuration or your ignored standalone
+configuration; keep the checked-in template empty. `connection_status` then reports
+`writeEnabled` and `capabilities.create/update` when the Apple session is ready.
+
+Use `get_reminder_lists` to select a list and `get_reminders` to obtain reminder IDs and current
+version tags. Creates need a new UUID `idempotencyKey` for each distinct reminder; reuse that
+same key and content after an uncertain result. Updates need the last-read `recordChangeTag`
+and a nonempty `changes` object. Only specified fields change. Supported fields are title, notes,
+priority, flag, due date, time zone and all-day status. Date edits on recurring or alarmed
+reminders are refused. Completion, deletion, moving lists and linked-record editing are excluded.
+
+`CONFLICT` requires a fresh read and review. `WRITE_OUTCOME_UNKNOWN` means Apple may have saved
+the change: read the indicated reminder before retrying, and never choose a new creation key
+for that attempt. Neither tool automatically retries writes or bypasses version conflicts.
+Synthetic acceptance does not establish live write interoperability; review the PR and use a
+dedicated test reminder for your first live test.
 
 ## Resources and configuration
 
@@ -89,13 +116,14 @@ cryptography and your Access configuration; validate those limits in your deploy
 | `ENCRYPTION_KEYS_JSON` **secret** | JSON key ring, for example `{"primary":"<32-byte base64 key>"}`. |
 | `LIVE_APPLE_CONNECTION_APPROVED` | `controlled-device-v2` enables the operator-approved account test. |
 | `APPLE_CRYPTO_REVIEW_APPROVED` | `device-proof-v2` acknowledges the operator's review of the browser proof protocol. |
+| `LIVE_APPLE_WRITES_APPROVED` | Optional: `controlled-create-edit-v1` enables bounded create/edit tools after operator review. Empty by default. |
 | `TEAM_DOMAIN` | Standalone only: `https://<team>.cloudflareaccess.com`. |
 | `POLICY_AUD` | Standalone only: Access application's audience tag. |
 | `CATALOGUE_BACKGROUND_RUNNER` | Optional: `cron` only with an actual standalone Cron trigger; local launcher sets `local`. |
 
-The two Apple approval settings default to empty. They are operator acknowledgements, not a review
+The three Apple approval settings default to empty. They are operator acknowledgements, not a review
 or audit performed by the software. Do not enable them before reviewing the trust boundary and
-accepting a controlled account test. Reminder mutations stay disabled even when login is enabled.
+accepting a controlled account test. Enabling login alone does not enable reminder creation or editing.
 
 ## Local setup
 
@@ -130,6 +158,18 @@ identity headers. It must remain running for local access and its automatic chec
 the stored session. Its ignored `.sites-runtime/local-icloud/` is private account state, not a fixture.
 
 Local tests and CI use synthetic data and do not require an Apple account.
+
+To explicitly opt into controlled local create/edit testing after reviewing the protocol:
+
+```bash
+npm run build
+npm run dev:icloud -- --enable-writes
+```
+
+This starts the existing dashboard with write tools enabled for its isolated local session.
+Use a dedicated test reminder. The normal launcher remains read-only. The diagnostic command
+`node scripts/dev/inspect-local-icloud.mjs write-shapes` performs bounded reads and reports only
+field types/version presence; it does not submit a write or print reminder contents.
 
 ## ChatGPT Sites setup
 
@@ -375,13 +415,13 @@ src/
   lib/               Shared utilities and connector helpers
   types/             Application and Worker type declarations
   api/               Authenticated API routing
-  mcp/               Read-only MCP tools
+  mcp/               MCP reads and gated create/edit tools
   auth/              Apple authentication and catalogue synchronization
   crypto/            Protocol cryptography and encrypted storage envelopes
   icloud/            CloudKit transport and record normalization
   persistence/       Native D1 session storage
   platform/          Sites and Cloudflare authentication adapters
-  reminders/         Reminder document codec
+  reminders/         Reminder document codec and bounded write schemas/payloads
   transport/         Bounded Apple HTTP and WebSocket transports
 scripts/
   build/             Vite plugins, framework build runner and artifact checks

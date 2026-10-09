@@ -30,7 +30,7 @@ export class AppleHTTP {
   readonly jar: CookieJar;
   readonly send: typeof fetch;
   constructor(jar = new CookieJar(), send: typeof fetch = fetch) { this.jar = jar; this.send = send.bind(globalThis); }
-  async request(value: string, options: { method?: "GET" | "POST" | "PUT"; headers?: HeadersInit; body?: string; discovered?: boolean; signal?: AbortSignal } = {}) {
+  async request(value: string, options: { method?: "GET" | "POST" | "PUT"; headers?: HeadersInit; body?: string; discovered?: boolean; signal?: AbortSignal; followRedirects?: boolean } = {}) {
     let url = validatedAppleURL(value, options.discovered); let method = options.method ?? "GET"; let body = options.body;
     const headers = new Headers(options.headers); headers.delete("cookie"); headers.delete("authorization");
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 8000);
@@ -45,7 +45,7 @@ export class AppleHTTP {
         // getSetCookie preserves commas inside Expires; fail rather than split a combined header.
         if (response.headers.has("set-cookie") && typeof response.headers.getSetCookie !== "function") throw new AppError("UNSUPPORTED_FEATURE", "This runtime cannot preserve separate Apple cookies.");
         for (const line of response.headers.getSetCookie?.() ?? []) this.jar.set(line, url);
-        if ([301, 302, 303, 307, 308].includes(response.status)) {
+        if (options.followRedirects !== false && [301, 302, 303, 307, 308].includes(response.status)) {
           const location = response.headers.get("location"); await response.body?.cancel();
           requireValue(location && hop < 3, "The Apple redirect budget was exceeded.");
           const next = validatedAppleURL(new URL(location, url).href, options.discovered);

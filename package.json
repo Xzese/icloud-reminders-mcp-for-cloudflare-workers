@@ -86,7 +86,7 @@
       "sharp": "0.35.4"
     }
   },
-  "description": "Read-only iCloud Reminders MCP server for Cloudflare Workers and ChatGPT Sites.",
+  "description": "iCloud Reminders MCP server with reads and opt-in create/edit tools for Cloudflare Workers and ChatGPT Sites.",
   "license": "MIT",
   "repository": {
     "type": "git",

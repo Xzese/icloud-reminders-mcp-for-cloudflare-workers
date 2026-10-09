@@ -9,6 +9,7 @@ import { Envelopes } from "../../src/crypto/envelopes.ts";
 import { loginAssurance } from "../../src/auth/apple/policy.ts";
 import { scanCatalogue } from "../../src/app/catalogue-scan.ts";
 import { createHash, randomBytes } from "node:crypto";
+import { verifyReminderWrites } from "./reminder-writes.mjs";
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const config = JSON.parse(await readFile(join(root, "dist/server/wrangler.json"), "utf8"));
 const directory = await mkdtemp(join(tmpdir(), "reminders-worker-acceptance-"));
@@ -76,7 +77,7 @@ try {
   };
   const init = await mcp("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "synthetic-acceptance", version: "1" } });
   assert.equal(init.result.serverInfo.name, "hosted-icloud-reminders");
-  const tools = await mcp("tools/list", {}); assert.deepEqual(tools.result.tools.map((t) => t.name).sort(), ["connection_status", "get_all_open_reminders", "get_reminder_lists", "get_reminders"]);
+  const tools = await mcp("tools/list", {}); assert.deepEqual(tools.result.tools.map((t) => t.name).sort(), ["connection_status", "create_reminder", "get_all_open_reminders", "get_reminder_lists", "get_reminders", "update_reminder"]);
   const gatedRead = await mcp("tools/call", { name: "get_reminders", arguments: { listId: "List/NEW" } }); assert.equal(gatedRead.result.isError, true);
   const call = await mcp("tools/call", { name: "connection_status", arguments: {} }); assert.equal(call.result.structuredContent.connected, false);
   const removed = await mcp("tools/call", { name: "feasibility_status", arguments: {} }); assert.equal(removed.result.isError, true);
@@ -428,7 +429,8 @@ try {
   await request("/api/auth/disconnect", { method: "POST", body: {} });
   assert.equal((await request("/api/apple/read", { method: "POST", body: { action: "discover", expectedGeneration: empty.generation } })).status, 409);
   fetchMock.assertNoPendingInterceptors();
-  console.log(JSON.stringify({ result: "passed", runtime: "local-workerd", productionBundle: true, checks: ["owner-denial", "origin-CSRF", "removed-feasibility-surfaces", "stateless-MCP", "nonce-CSP", "gated-auth-no-state", "unverified-Apple-success-rejected", "dedicated-credential-document", "encrypted-session-cold-start", "restored-cookie-compound-read", "two-list-concurrent-read", "incremental-catalogue-cold-restart", "expired-catalogue-token", "scheduled-catalogue-without-browser", "background-initial-scan-pause-resume", "on-demand-MCP-catch-up", "all-open-reminders-across-three-lists", "completion-removes-open-reminder", "persistent-catalogue-page-counts", "failed-batch-drains-lease", "batch-auth-invalidation", "disconnect-rejects-read"], liveAppleValidated: false }));
+  const writeAcceptance = await verifyReminderWrites(options);
+  console.log(JSON.stringify({ result: "passed", runtime: "local-workerd", productionBundle: true, checks: ["owner-denial", "origin-CSRF", "removed-feasibility-surfaces", "stateless-MCP", "nonce-CSP", "gated-auth-no-state", "unverified-Apple-success-rejected", "dedicated-credential-document", "encrypted-session-cold-start", "restored-cookie-compound-read", "two-list-concurrent-read", "incremental-catalogue-cold-restart", "expired-catalogue-token", "scheduled-catalogue-without-browser", "background-initial-scan-pause-resume", "on-demand-MCP-catch-up", "all-open-reminders-across-three-lists", "completion-removes-open-reminder", "persistent-catalogue-page-counts", "failed-batch-drains-lease", "batch-auth-invalidation", "disconnect-rejects-read", ...writeAcceptance.checks], liveAppleValidated: false }));
 } finally {
   if (worker) await worker.dispose(); await rm(directory, { recursive: true, force: true });
 }

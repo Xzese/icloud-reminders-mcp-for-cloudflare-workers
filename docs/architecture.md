@@ -16,7 +16,7 @@ The editable standalone configuration is `wrangler.toml`, with private/generated
 excluded from public source. Framework-generated Wrangler JSON stays inside `dist/`.
 
 D1 holds encrypted Apple-session envelopes in `apple_session_state`. Envelope associated data
-binds owner/account/generation/schema. Versioned leases fence concurrent setup, consent, reads
+binds owner/account/generation/schema. Versioned leases fence concurrent setup, consent, reads, writes
 and disconnect. `schema.sql` defines the sole application table for a new deployment. Local setup
 and tests execute it directly using native D1. Standalone operators initialize D1 with Wrangler's
 `d1 execute --file schema.sql`. The Sites build copies it into the platform's SQL initialization
@@ -33,6 +33,20 @@ Forward catalogue pages update encrypted list snapshots/checkpoints. Reminder MC
 bounded initial and incremental synchronization, then live reminder queries. Reminder bodies are
 not persisted. Optional standalone scheduled events reuse the same fenced catalogue operation.
 Neither a background-handler declaration nor browser polling provisions a recurring trigger.
+
+Optional reminder creation/editing uses the same private CloudKit transport and session lease.
+`LIVE_APPLE_WRITES_APPROVED` must explicitly enable the bounded write gate; login permission alone
+does not allow writes. Exact lookups verify the current list and reminder before dispatch.
+Creates derive the Apple record ID from the caller's UUID idempotency key, while updates send
+only changed fields with an exact server change tag. Resolution tokens for untouched fields
+are retained. Reminder content and mutation receipts are not cached in D1, and no new database
+table or resource is required. The protocol rejects force-update, replacement and deletion.
+
+Writes are never automatically retried or redirected. An uncertain upstream response or a lost
+session fence after submission returns `WRITE_OUTCOME_UNKNOWN`; local fencing cannot undo an
+Apple request already in flight. Read current state before another edit, or reconcile creation
+using the same UUID. Successful mutations invalidate an unfinished all-open continuation so it
+cannot silently skip a newly created item in a previously scanned list. See `write-access.md`.
 
 The provenance directory preserves upstream references and licenses. Checked-in synthetic fixtures
 exercise the pinned protocol reference, not a live Apple account. See SECURITY.md for invariants

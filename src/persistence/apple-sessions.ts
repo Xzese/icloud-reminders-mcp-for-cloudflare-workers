@@ -397,6 +397,15 @@ export class AppleSessionRepository {
     return { generation: row.generation, version: row.version, resumeId, expiresAt };
   }
 
+  async assertWriteLease(fence: ResumeFence) {
+    // Recheck immediately before dispatch. Reads used to prepare the write must
+    // not consume the remaining lease or let a disconnect/reconnect go unnoticed.
+    const now = Date.now();
+    const row = await this.db.prepare("SELECT 1 AS active FROM apple_session_state WHERE owner_id = ? AND account_id = ? AND generation = ? AND version = ? AND state = 'READY' AND transaction_id IS NULL AND resume_id = ? AND resume_expires_at > ?")
+      .bind(this.owner, ACCOUNT, fence.generation, fence.version, fence.resumeId, now + 10_000).first<{ active: number }>();
+    if (!row) throw new AppError("CONFLICT", "The Apple session changed or the preparation budget expired. Refresh before retrying; no write was sent.", 409, true);
+  }
+
   async commitResume(fence: ResumeFence, session: AppleSession, state: AppleSessionState, action?: ApprovalAction) {
     const parsed = await this.checkedSession(session);
     const saved = await this.load();

@@ -2,9 +2,9 @@
 
 ## Supported version
 
-Security fixes are applied to the latest version on the default branch. This is an experimental,
-read-only integration; synthetic test coverage is not an independent cryptographic audit or a
-production security guarantee.
+Security fixes are applied to the latest version on the default branch. This is an experimental
+integration with reads and opt-in controlled create/edit access. Synthetic test coverage is not
+an independent cryptographic audit or a production security guarantee.
 
 ## Reporting a vulnerability
 
@@ -53,7 +53,16 @@ application's local 24-hour session limit.
   to SMS, voice or legacy authentication. Reject missing, mismatched or replayed protocol proofs.
 - Keep the absolute session lifetime bounded. Reads must not extend it. Disconnect must clear
   stored session state; expiry must reject reads and clear expired records on access.
-- Keep reminder writes disabled. Use bounded reads, pagination, transport sizes, decompression,
+- Keep reminder writes disabled unless the operator explicitly enables the create/edit gate.
+  The same owner, current ready session and exact private-zone lookups must precede a write.
+  Use only bounded single-record create/update operations, deterministic create IDs and exact
+  record change tags. Never force an edit, replace a record, delete one or automatically replay
+  a submitted write. Preserve omitted fields and unmodified resolution tokens. Refuse unsupported
+  linked-record date edits rather than updating only part of a recurrence or alarm.
+- Return uncertain outcomes honestly. An in-flight Apple write cannot be undone by local
+  disconnect fencing. A timeout, malformed confirmation or lost fence after submission must
+  require reconciliation instead of reporting a confirmed failure or success.
+- Use bounded reads, pagination, transport sizes, decompression,
   checkpoint-cycle detection and upstream backoff rather than indefinite retries.
 - Prevent cross-origin state changes and authentication WebSocket access. Preserve the isolated
   credential page's nonce CSP and no-referrer policy; do not add analytics or third-party scripts.
@@ -65,7 +74,8 @@ application's local 24-hour session limit.
 
 Authentication bypass, owner/session isolation failures, credential disclosure, forged or replayed
 proof acceptance, stale-session access after disconnect, unsafe parsing/decompression, unauthorized
-upstream access and unintended reminder writes are reportable. Assess realistic reachability and
+upstream access, write-gate bypass, stale-version overwrites, unintended duplicate creates and
+other unintended reminder writes are reportable. Assess realistic reachability and
 impact for the affected deployment; no blanket exclusions or accepted-risk suppressions are defined.
 
 Apple's undocumented endpoints and cryptographic assumptions may change. Pinned synthetic vectors
@@ -74,3 +84,9 @@ Deployment-specific Access/Managed OAuth configuration and live Apple acceptance
 the operator. Apple may revoke a session before its local deadline. Expired records are removed on
 next access, not by a guaranteed timed purge. This project does not revoke Apple's remembered-browser
 trust when deleting its local encrypted record.
+
+The experimental write codec follows pinned pyicloud text-document and resolution-token
+algorithms. It has not been independently audited or validated through a live write here.
+Changing a text field replaces that document's formatting; untouched documents remain intact.
+Synthetic checks establish local safeguards and response handling, not Apple's current acceptance.
+Operators must validate a dedicated test reminder before using write access on personal items.

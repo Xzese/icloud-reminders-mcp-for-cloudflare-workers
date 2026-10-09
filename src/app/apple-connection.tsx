@@ -11,6 +11,7 @@ interface Status {
   generation: number;
   nextAttemptAt: number;
   transportReady: boolean;
+  writeEnabled: boolean;
   action: string | null;
   expiresAt: number | null;
   gates: { enabled: boolean; cryptographyReviewed: boolean; liveConnectionApproved: boolean };
@@ -89,6 +90,7 @@ export default function AppleConnection() {
     { label: "Workspace signed in", checked: true },
     { label: "Apple account connected", checked: ready },
     { label: "Reminders access ready", checked: ready },
+    { label: "Create and edit enabled", checked: ready && status?.writeEnabled === true },
     { label: "Lists found", checked: ready && scan.listCount > 0 },
     { label: "List scan complete", checked: ready && !!scan.sync?.initialComplete && !scan.sync.pending },
   ];
@@ -99,7 +101,7 @@ export default function AppleConnection() {
         <details className="testing-panel"><summary>Workspace setup</summary><div className="testing-content"><p>Copy this setup identity for the person configuring your workspace.</p><label htmlFor="site-identity">Your Site identity</label><input id="site-identity" value={ownerIdentity} readOnly /><div className="action-row"><Button variant="outline" onClick={() => void navigator.clipboard.writeText(ownerIdentity).then(() => setCopied(true)).catch(() => setError("Copy didn’t work. Select the setup identity and copy it manually."))}><Copy size={16} aria-hidden="true" />{copied ? "Copied" : "Copy Site identity"}</Button><Button variant="ghost" disabled={busy} onClick={() => void refresh()}>Check setup</Button></div></div></details>
       </section> : <section className="dashboard-card" aria-labelledby="connection-title">
         <div className="card-heading"><div className="card-icon"><Cloud size={23} aria-hidden="true" /></div><div><h2 id="connection-title">{title}</h2><p>{description}</p></div></div>
-        {ready ? <div className="account-banner"><ShieldCheck size={20} aria-hidden="true" /><span>Your connection is ready. Reminder changes are turned off.</span></div> : pending ? <div className="action-row"><Button className="action-primary" disabled={busy || now < (status?.nextAttemptAt ?? 0)} onClick={() => void action("/api/auth/resume")}><RefreshCw size={17} className={busyAction ? "animate-spin" : undefined} aria-hidden="true" />{busyAction ? "Checking approval…" : "Check Apple approval"}</Button>{status && status.nextAttemptAt > now && <p className="fine-print" role="status">Try again in {Math.ceil((status.nextAttemptAt - now) / 1000)} seconds.</p>}</div> : status?.gates.enabled && <><a className="button-link action-primary" href="/connect/apple" target="_top">{status.state === "CONNECTING" ? "Continue Apple sign-in" : "Connect Apple account"}<ArrowRight size={17} aria-hidden="true" /></a><div className="notice"><Info size={17} className="notice-icon" aria-hidden="true" /><p>This uses an unofficial iCloud connection. On the next page, this app processes your Apple password to sign in and Apple verifies your device.</p></div></>}
+        {ready ? <div className="account-banner"><ShieldCheck size={20} aria-hidden="true" /><span>{status?.writeEnabled ? "You can create and edit open reminders with ChatGPT." : "Your connection is ready. Reminder changes are turned off."}</span></div> : pending ? <div className="action-row"><Button className="action-primary" disabled={busy || now < (status?.nextAttemptAt ?? 0)} onClick={() => void action("/api/auth/resume")}><RefreshCw size={17} className={busyAction ? "animate-spin" : undefined} aria-hidden="true" />{busyAction ? "Checking approval…" : "Check Apple approval"}</Button>{status && status.nextAttemptAt > now && <p className="fine-print" role="status">Try again in {Math.ceil((status.nextAttemptAt - now) / 1000)} seconds.</p>}</div> : status?.gates.enabled && <><a className="button-link action-primary" href="/connect/apple" target="_top">{status.state === "CONNECTING" ? "Continue Apple sign-in" : "Connect Apple account"}<ArrowRight size={17} aria-hidden="true" /></a><div className="notice"><Info size={17} className="notice-icon" aria-hidden="true" /><p>This uses an unofficial iCloud connection. On the next page, this app processes your Apple password to sign in and Apple verifies your device.</p></div></>}
         <div className="action-row"><Button variant="outline" disabled={busy || scan.busy} onClick={() => void refresh()}><RefreshCw size={16} className={refreshing ? "animate-spin" : undefined} aria-hidden="true" />{refreshing ? "Checking connection…" : "Refresh connection"}</Button></div>
       </section>}
       {error && !ownerIdentity && <p className="connection-error notice notice-warning" role="alert">{error}</p>}
@@ -115,7 +117,7 @@ export default function AppleConnection() {
         <p className="fine-print">{ready ? (scan.scanning ? "A list scan is running. Keep this page open until it finishes or pause it." : scan.auto?.runner === "unavailable" ? "ChatGPT checks for list updates when you ask for reminders." : scan.auto?.enabled && !scan.auto.pausedForError ? "Automatic list checks are enabled." : "Automatic checks are paused. ChatGPT can still check on demand.") : "Connect Apple to see your lists and scan progress."}</p>
         {status && ["READY", "DEVICE_APPROVAL_PENDING", "CONNECTING"].includes(status.state) && <div className="account-actions"><AlertDialog><AlertDialogTrigger asChild><Button variant="outline" className="disconnect-button" disabled={busy}><Unplug size={16} aria-hidden="true" />Disconnect Apple account</Button></AlertDialogTrigger><AlertDialogContent className="dialog-card"><AlertDialogHeader><AlertDialogTitle>Disconnect Apple account?</AlertDialogTitle><AlertDialogDescription>This removes the saved Apple connection and list scan progress from this workspace. You can connect again any time.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter className="dialog-actions"><AlertDialogCancel>Keep connected</AlertDialogCancel><AlertDialogAction className="disconnect-button" onClick={() => void action("/api/auth/disconnect")}>Disconnect Apple account</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div>}
       </section>
-      <div className="notice"><ShieldCheck size={17} className="notice-icon" aria-hidden="true" /><p>This workspace reads reminders. Editing and completing reminders are turned off.</p></div>
+      <div className="notice"><ShieldCheck size={17} className="notice-icon" aria-hidden="true" /><p>{status?.writeEnabled ? "Creating and editing are enabled. Completing and deleting reminders remain turned off." : "This workspace reads reminders. Creating and editing are turned off."}</p></div>
     </aside>
   </div>;
 }

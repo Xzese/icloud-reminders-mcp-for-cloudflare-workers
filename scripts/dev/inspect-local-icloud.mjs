@@ -3,7 +3,7 @@
 import http from "node:http";
 const origin = "http://127.0.0.1:5173";
 const [command = "status", option] = process.argv.slice(2);
-if (!["status", "discover", "read-test", "catalogue", "other-zones", "lookup-lists", "shared-lists", "saved-lists", "batch-read", "sync-catalogue", "mcp-open-reminders", "mcp-all-open-reminders"].includes(command)) throw new Error("Use status, discover, other-zones, catalogue <1..100 pages>, lookup-lists <List/id ...>, or read-test.");
+if (!["status", "discover", "read-test", "write-shapes", "catalogue", "other-zones", "lookup-lists", "shared-lists", "saved-lists", "batch-read", "sync-catalogue", "mcp-open-reminders", "mcp-all-open-reminders"].includes(command)) throw new Error("Use status, discover, other-zones, catalogue <1..100 pages>, lookup-lists <List/id ...>, read-test, or write-shapes.");
 if (command === "read-test" && option !== undefined && option !== "open") throw new Error("Use read-test [open].");
 const pages = command === "catalogue" ? Number(option ?? 25) : 1;
 if (!Number.isInteger(pages) || pages < 1 || pages > 100) throw new Error("The page budget must be 1..100.");
@@ -27,7 +27,32 @@ const status = await call("/api/connection");
 console.log(JSON.stringify({ operation: "status", state: status.state, generation: status.generation, transportReady: status.transportReady, action: status.action, writesEnabled: status.gates.writesEnabled }));
 if (command === "status") process.exit(0);
 if (status.state !== "READY") throw new Error("The Apple connection is not ready for a controlled read.");
-if (command === "sync-catalogue") {
+if (command === "write-shapes") {
+  const { buildUpdateReminder } = await import("../../src/reminders/writes.ts");
+  // Inspect bounded read metadata only. No account/list/record identifiers,
+  // titles, documents, asset links, change tags or token values are printed.
+  const saved = await call("/api/apple/read", { action: "saved-lists", expectedGeneration: status.generation });
+  const lists = saved.result.records.filter(record => !record.deleted && !record.isGroup).slice(0, 3);
+  for (const [index, list] of lists.entries()) {
+    const page = await call("/api/apple/read", { action: "reminders", expectedGeneration: status.generation, listId: list.id, includeCompleted: false, limit: 1 });
+    const record = page.result.records.find(record => record.id.startsWith("Reminder/") && !record.deleted);
+    const fields = record?.appleRecord?.fields ?? {};
+    const types = Object.fromEntries(Object.entries(fields).filter(([name]) => /^[A-Za-z][A-Za-z0-9]{0,63}$/.test(name)).map(([name, field]) => [name, typeof field?.type === "string" && /^[A-Z0-9_]{1,32}$/.test(field.type) ? field.type : "unknown"]));
+    let resolutionMapEntries = null;
+    try { const value = JSON.parse(fields.ResolutionTokenMap?.value); if (value?.map && typeof value.map === "object" && !Array.isArray(value.map)) resolutionMapEntries = Object.keys(value.map).length; } catch { /* No private values are logged. */ }
+    let titleEditCodecSupported = false, codecRejectionCode = null;
+    if (record?.appleRecord && record.recordChangeTag) {
+      try {
+        const raw = record.appleRecord;
+        // Build and discard a plain-text patch in memory. This tests the codec
+        // and token-map shape only; it never dispatches or validates ownership.
+        buildUpdateReminder({ listId: list.id, reminderId: record.id, recordChangeTag: record.recordChangeTag, changes: { title: "Controlled local codec probe" } }, { ...raw, raw }, raw.zoneID?.ownerRecordName ?? "__defaultOwner__");
+        titleEditCodecSupported = true;
+      } catch (error) { codecRejectionCode = /^[A-Z_]{1,32}$/.test(error?.code ?? "") ? error.code : "VALIDATION_ERROR"; }
+    }
+    console.log(JSON.stringify({ operation: "write-shapes-read-only", listIndex: index + 1, reminderFound: !!record, changeTagPresent: typeof record?.recordChangeTag === "string", fieldTypes: types, resolutionMapEntries, hasAlarms: !!record?.alarmIds?.length, hasRecurrence: !!record?.recurrenceRuleIds?.length, allDay: record?.allDay, dueDatePresent: typeof record?.dueDate === "string", timeZonePresent: typeof record?.timeZone === "string", titleEditCodecSupported, codecRejectionCode, writesEnabled: false }));
+  }
+} else if (command === "sync-catalogue") {
   const { syncCatalogue, mergeCatalogueChoices, selectableList } = await import("../../src/app/catalogue-scan.ts");
   const saved = await call("/api/apple/read", { action: "saved-lists", expectedGeneration: status.generation });
   let catalogue = saved.result.records, progress = saved.result.catalogueSync; const started = Date.now();

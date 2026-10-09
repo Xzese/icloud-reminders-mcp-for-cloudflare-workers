@@ -4,7 +4,7 @@ import { handleMCP } from "../mcp/handler.ts";
 import { limitedBytes } from "../transport/apple-http.ts";
 import { appleAuthSocket } from "../auth/socket.ts";
 import { AppleConnectionService, ControlledRead, ResumeRequest } from "../auth/service.ts";
-import { appleGates, requireAppleEnabled } from "../auth/gates.ts";
+import { appleGates, requireAppleEnabled, requireAppleWritesEnabled } from "../auth/gates.ts";
 import { credentialDocument, credentialScript } from "../auth/credential-page.ts";
 
 const json = (data: unknown, status = 200) => Response.json(data, { status, headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" } });
@@ -52,7 +52,13 @@ export async function applicationRoute(request: Request, env: RuntimeEnv, creden
         const parsed = ControlledRead.safeParse(value); if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Select a valid controlled Reminders read.");
         return json(await service.read(parsed.data));
       }
-      if (path === "/api/mutations") throw new AppError("UNSUPPORTED_FEATURE", "Reminder writes have not been validated and are disabled.");
+      if (path === "/api/mutations") {
+        requireAppleWritesEnabled(env);
+        const bytes = await limitedBytes(new Response(request.body, { headers: request.headers }), 65_536);
+        let value: unknown;
+        try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new AppError("VALIDATION_ERROR", "Provide a valid reminder create/edit request.", 400); }
+        return json(await new AppleConnectionService(env, owner).mutate(value));
+      }
 
     }
     return json({ error: { code: "NOT_FOUND", message: "This application route is unavailable.", requestId } }, 404);

@@ -1,5 +1,5 @@
 {
-  "status": "hosted synthetic feasibility verified; gated authentication and read transport implemented; live interoperability unproven",
+  "status": "gated authentication, read transport and experimental controlled create/edit implemented; live write interoperability unproven",
   "sources": [
     {
       "repository": "https://github.com/timlaing/pyicloud",
@@ -47,7 +47,16 @@
           "path": "pyicloud/services/reminders/_protocol.py",
           "sha256": "4d6997661faa2920267be0696dde8033693875d4e3cd9a386fc423a7ff06970d",
           "destinations": [
-            "src/reminders/crdt.ts"
+            "src/reminders/crdt.ts",
+            "src/reminders/writes.ts"
+          ]
+        },
+        {
+          "path": "pyicloud/services/reminders/_writes.py",
+          "sha256": "9b66dfc87aad243ba2c9b04bc458fffbec54b6055895bafc2d7a1506bf443ec2",
+          "destinations": [
+            "src/reminders/writes.ts",
+            "src/icloud/cloudkit.ts"
           ]
         },
         {
@@ -144,7 +153,7 @@
   ],
   "notImplemented": [
     "Complete cached read/search/sync release",
-    "Reminders mutation service and advanced write acceptance",
+    "Completion/deletion, advanced linked-record mutations and live write acceptance",
     "Independent cryptographic audit and standalone live deployment acceptance"
   ]
 }
