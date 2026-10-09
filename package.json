@@ -90,7 +90,7 @@
       "sharp": "0.35.4"
     }
   },
-  "description": "iCloud Reminders MCP server with reads and opt-in create/edit tools for Cloudflare Workers and ChatGPT Sites.",
+  "description": "iCloud Reminders MCP server with reads and opt-in reminder mutation tools for Cloudflare Workers and ChatGPT Sites.",
   "license": "MIT",
   "repository": {
     "type": "git",

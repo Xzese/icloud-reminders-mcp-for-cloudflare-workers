@@ -3,16 +3,19 @@ import { AppError, WriteOutcomeUnknownError } from "../errors.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
 import { AppleSessionRepository, CATALOGUE_AUTO_INTERVAL_MS, catalogueAutoMetadata, catalogueAutoSchedule, catalogueSyncMetadata, mergeSavedLists, type AppleSession, type AllOpenScan, type CatalogueAutoCheckpoint, type ResumeFence } from "../persistence/apple-sessions.ts";
 import { CloudKitRateLimitedError, CloudKitRemindersClient, normalizeList, normalizeReminder, type CloudKitPage, type CloudKitRecord, type CloudKitLookupResult } from "../icloud/cloudkit.ts";
-import { CreateReminderInput, UpdateReminderInput, buildCreateReminder, buildUpdateReminder, matchesCreatedReminder, type CloudKitWriteRecord } from "../reminders/writes.ts";
+import { CreateReminderInput, UpdateReminderInput, ReminderTargetInput, buildCreateReminder, buildUpdateReminder, buildLifecycleReminder, matchesCreatedReminder, type CloudKitWriteRecord } from "../reminders/writes.ts";
 import { decodeDocument } from "../reminders/crdt.ts";
 import { AppleAuthHTTP } from "./apple/http.ts";
 import { advancePcs } from "./apple/pcs.ts";
-import { appleDisabledMessage, appleGates, requireAppleEnabled, requireAppleWritesEnabled } from "./gates.ts";
+import { appleDisabledMessage, appleGates, requireAppleEnabled, requireAppleWritesEnabled, requireAppleLifecycleWritesEnabled } from "./gates.ts";
 
 export const ResumeRequest = z.object({ expectedGeneration: z.number().int().nonnegative().safe() }).strict();
 export const ReminderMutation = z.discriminatedUnion("action", [
   CreateReminderInput.extend({ action: z.literal("create"), expectedGeneration: ResumeRequest.shape.expectedGeneration }).strict(),
   UpdateReminderInput.extend({ action: z.literal("update"), expectedGeneration: ResumeRequest.shape.expectedGeneration }).strict(),
+  ReminderTargetInput.extend({ action: z.literal("complete"), expectedGeneration: ResumeRequest.shape.expectedGeneration }).strict(),
+  ReminderTargetInput.extend({ action: z.literal("reopen"), expectedGeneration: ResumeRequest.shape.expectedGeneration }).strict(),
+  ReminderTargetInput.extend({ action: z.literal("delete"), expectedGeneration: ResumeRequest.shape.expectedGeneration }).strict(),
 ]);
 const common = { expectedGeneration: z.number().int().nonnegative().safe(), continuation: z.string().min(1).max(8192).nullable().optional(), limit: z.number().int().min(1).max(200).default(200) };
 const listIdSchema = z.string().min(6).max(512).startsWith("List/");
@@ -105,10 +108,13 @@ function writeLookupRecord(result: CloudKitLookupResult, id: string, allowMissin
   return record;
 }
 
-function verifyWriteFields(write: CloudKitWriteRecord, confirmed: CloudKitRecord, owner: string, listId: string) {
+function verifyWriteFields(write: CloudKitWriteRecord, confirmed: CloudKitRecord, current: CloudKitRecord, owner: string, listId: string) {
   const reminder = normalizeReminder(confirmed, owner);
-  if (reminder.listId !== listId || reminder.completed !== false || reminder.deleted !== false) throw new WriteOutcomeUnknownError(write.recordName);
-  const values: Record<string, unknown> = { Priority: reminder.priority, Flagged: reminder.flagged === null ? null : Number(reminder.flagged), AllDay: reminder.allDay === null ? null : Number(reminder.allDay), TimeZone: reminder.timeZone, DueDate: reminder.dueDate === null ? null : Date.parse(reminder.dueDate) };
+  const before = normalizeReminder(current, owner);
+  const expectedCompleted = write.fields.Completed ? write.fields.Completed.value === 1 : before.completed;
+  const expectedDeleted = write.fields.Deleted ? write.fields.Deleted.value === 1 : before.deleted;
+  if (reminder.listId !== listId || reminder.completed !== expectedCompleted || reminder.deleted !== expectedDeleted) throw new WriteOutcomeUnknownError(write.recordName);
+  const values: Record<string, unknown> = { Completed: Number(reminder.completed), Deleted: Number(reminder.deleted), CompletionDate: reminder.completedDate === null ? null : Date.parse(reminder.completedDate), Priority: reminder.priority, Flagged: reminder.flagged === null ? null : Number(reminder.flagged), AllDay: reminder.allDay === null ? null : Number(reminder.allDay), TimeZone: reminder.timeZone, DueDate: reminder.dueDate === null ? null : Date.parse(reminder.dueDate) };
   for (const [key, field] of Object.entries(write.fields)) {
     if (key === "TitleDocument" || key === "NotesDocument") {
       const expected = decodeDocument(String(field.value)).text;
@@ -126,15 +132,37 @@ export class AppleConnectionService {
     const readsAvailable = gates.enabled && session.transportReady;
     const { liveReadValidated: _legacyValidation, ...connection } = session;
     const writesAvailable = readsAvailable && gates.writesEnabled;
-    return { ...connection, gates, connected: readsAvailable, writeEnabled: writesAvailable, phase: writesAvailable ? "controlled-create-edit" : "read-only", capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: writesAvailable, update: writesAvailable, complete: false, reopen: false, delete: false }, validation: { fullProductAcceptance: false, liveWriteAcceptance: false }, mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_all_open_reminders", "create_reminder", "update_reminder"], message: !gates.enabled ? appleDisabledMessage(gates) : session.state === "READY" ? (writesAvailable ? "Controlled reminder creation and editing are enabled. Use current list IDs and reminder version tags. Completion, reopening and deletion remain unavailable." : "Read-only reminder tools are available. Use get_all_open_reminders for current open reminders across all lists. Reminder reads automatically start or resume catalogue scanning. If a bounded scan is unfinished, repeat the tool after SYNC_IN_PROGRESS to continue saved progress. Reminder changes remain disabled.") : session.state === "DEVICE_APPROVAL_PENDING" ? (session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again.") : "Connect your Apple account through the private Site's secure connection form." };
+    return { ...connection, gates, connected: readsAvailable, writeEnabled: writesAvailable, phase: writesAvailable ? (gates.lifecycleWritesEnabled ? "controlled-reminder-writes" : "controlled-create-edit") : "read-only", capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: writesAvailable, update: writesAvailable, complete: readsAvailable && gates.lifecycleWritesEnabled, reopen: readsAvailable && gates.lifecycleWritesEnabled, delete: readsAvailable && gates.lifecycleWritesEnabled }, validation: { fullProductAcceptance: false, liveWriteAcceptance: false }, mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_reminder", "get_all_open_reminders", "create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "delete_reminder"], message: !gates.enabled ? appleDisabledMessage(gates) : session.state === "READY" ? (writesAvailable ? (gates.lifecycleWritesEnabled ? "Controlled reminder creation, editing, completion, reopening and deletion are enabled. Use current list IDs and reminder version tags." : "Controlled reminder creation and editing are enabled. Completion, reopening and deletion require the separate v2 write approval.") : "Read-only reminder tools are available. Use get_all_open_reminders for current open reminders across all lists. Reminder reads automatically start or resume catalogue scanning. If a bounded scan is unfinished, repeat the tool after SYNC_IN_PROGRESS to continue saved progress. Reminder changes remain disabled.") : session.state === "DEVICE_APPROVAL_PENDING" ? (session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again.") : "Connect your Apple account through the private Site's secure connection form." };
   }
   async disconnect() { return await new AppleSessionRepository(this.env, this.owner).disconnect(); }
+  async readReminderForMCP(expectedGeneration: number, listId: string, reminderId: string) {
+    const parsed = ReminderTargetInput.omit({ recordChangeTag: true }).safeParse({ listId, reminderId });
+    if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Provide exact canonical list and reminder IDs.", 400);
+    return this.operation(expectedGeneration, "read", async (http, saved, repository, fence) => {
+      const client = new CloudKitRemindersClient(http.http, saved.session.connection);
+      if (client.remindersZoneOwner === undefined && !(await client.listZones()).available) throw new AppError("PROTOCOL_CHANGED", "Apple did not return an available private Reminders zone.");
+      const found = await client.lookup([listId, reminderId]);
+      const list = writeLookupRecord(found, listId, false)!;
+      if (list.recordType !== "List" || normalizeList(list, false).deleted || normalizeList(list, false).isGroup) throw new AppError("CONFLICT", "The requested list is unavailable.", 409);
+      const item = found.records.find(record => record.recordName === reminderId);
+      const current = item?.deleted === true ? null : writeLookupRecord(found, reminderId, true);
+      let record = null;
+      if (current) {
+        const { raw: _raw, ...normalized } = normalizeReminder(current, client.remindersZoneOwner);
+        if (normalized.listId !== listId) throw new AppError("FORBIDDEN", "The reminder does not belong to the requested list.", 403);
+        record = normalized;
+      }
+      await repository.commitResume(fence, { ...saved.session, connection: { ...saved.session.connection, remindersZoneOwner: client.remindersZoneOwner }, auth: http.snapshot() }, "READY");
+      return { generation: fence.generation, record, missing: record === null };
+    });
+  }
   async mutate(value: unknown) {
     // The deployment gate precedes parsing, storage access and Apple requests.
     requireAppleWritesEnabled(this.env);
     const parsed = ReminderMutation.safeParse(value);
-    if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Provide a bounded reminder create/edit request with the current session generation.", 400);
+    if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Provide a bounded reminder mutation request with the current session generation.", 400);
     const input = parsed.data;
+    if (input.action !== "create" && input.action !== "update") requireAppleLifecycleWritesEnabled(this.env);
     const targetId = input.action === "create" ? `Reminder/${input.idempotencyKey.toUpperCase()}` : input.reminderId;
     let applied = false;
     try {
@@ -170,11 +198,15 @@ export class AppleConnectionService {
           }
         } else {
           const { action: _action, expectedGeneration: _generation, ...update } = input;
-          write = buildUpdateReminder(update, current!, owner);
+          if (input.action === "update") {
+            write = buildUpdateReminder({ ...update, changes: input.changes }, current!, owner);
+          } else {
+            write = buildLifecycleReminder(input.action, update, current!, owner);
+          }
           await repository.assertWriteLease(fence);
           confirmed = await client.modifyReminder("update", write);
           applied = true;
-          verifyWriteFields(write, confirmed, owner, input.listId);
+          verifyWriteFields(write, confirmed, current!, owner, input.listId);
         }
         const { raw: _raw, ...record } = normalizeReminder(confirmed, owner);
         const { allOpenScan: _staleScan, ...session } = saved.session;

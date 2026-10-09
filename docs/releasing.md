@@ -54,7 +54,7 @@ It refuses to overwrite existing output and excludes Git history, environment fi
 build output, diagnostics and generated deployment configuration. This is optional packaging,
 not a second development checkout.
 
-Document the release as experimental, with reads enabled and create/edit disabled by default.
+Document the release as experimental, with reads enabled and reminder mutations disabled by default.
 Document the separate write gate and outstanding live-write validation. Unit/synthetic workerd checks do not validate
 an operator's live Access policy, Managed OAuth/ChatGPT connection or Apple account authentication.
 Every deployment must complete those acceptance checks with its own authorized owner. Publishing

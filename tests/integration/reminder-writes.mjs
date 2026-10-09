@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { Envelopes } from "../../src/crypto/envelopes.ts";
 import { loginAssurance } from "../../src/auth/apple/policy.ts";
 import { encodeDocument } from "../../src/reminders/crdt.ts";
-import { runControlledWriteChecks } from "../../scripts/dev/validate-local-reminder-writes.mjs";
+import { runControlledWriteChecks, runControlledLifecycleChecks } from "../../scripts/dev/validate-local-reminder-writes.mjs";
 
 const root = resolve(fileURLToPath(new URL("../..", import.meta.url)));
 const listId = "List/WRITE-ACCEPTANCE";
@@ -90,7 +90,7 @@ export async function verifyReminderWrites(options) {
   const keyRing = JSON.parse(secret);
   const keyId = options.bindings.ENCRYPTION_KEY_ID;
 
-  const makeWorker = async ({ writes = true } = {}) => {
+  const makeWorker = async ({ writes = true, lifecycle = true } = {}) => {
     const state = {
       records: new Map([[listId, listRecord()], [reminderId, reminderRecord(reminderId)],
         ["Reminder/WRITE-RECURRING", reminderRecord("Reminder/WRITE-RECURRING", { recurrence: true })],
@@ -101,7 +101,7 @@ export async function verifyReminderWrites(options) {
       ...options.bindings,
       LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2",
       APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2",
-      ...(writes ? { LIVE_APPLE_WRITES_APPROVED: "controlled-create-edit-v1" } : {}),
+      ...(writes ? { LIVE_APPLE_WRITES_APPROVED: lifecycle ? "controlled-reminder-writes-v2" : "controlled-create-edit-v1" } : {}),
     };
     if (!writes) delete bindings.LIVE_APPLE_WRITES_APPROVED;
     const outboundService = async request => {
@@ -114,7 +114,8 @@ export async function verifyReminderWrites(options) {
       if (url.pathname.endsWith("/records/query")) {
         assert.equal(body.query.recordType, "reminderList");
         assert.equal(body.query.filterBy.find(filter => filter.fieldName === "List").fieldValue.value.recordName, listId);
-        return jsonResponse({ records: [...state.records.values()].filter(record => record.recordType === "Reminder" && record.fields.List.value.recordName === listId && record.fields.Completed.value === 0) });
+        const includeCompleted = body.query.filterBy.find(filter => filter.fieldName === "includeCompleted").fieldValue.value === 1;
+        return jsonResponse({ records: [...state.records.values()].filter(record => record.recordType === "Reminder" && record.fields.List.value.recordName === listId && record.fields.Deleted.value === 0 && (includeCompleted || record.fields.Completed.value === 0)) });
       }
       if (url.pathname.endsWith("/records/lookup")) {
         if (state.holdLookup) {
@@ -137,6 +138,7 @@ export async function verifyReminderWrites(options) {
         if (action === "record-conflict") return jsonResponse({ records: [{ recordName: operation.record.recordName, serverErrorCode: "CONFLICT" }] });
 
         const current = state.records.get(operation.record.recordName);
+        if (operation.operationType === "update" && operation.record.recordChangeTag !== current.recordChangeTag) return jsonResponse({ records: [{ recordName: operation.record.recordName, serverErrorCode: "CONFLICT" }] });
         const next = operation.operationType === "create"
           ? { ...operation.record, zoneID: { zoneName: "Reminders", zoneType: "REGULAR_CUSTOM_ZONE", ownerRecordName: zoneOwner }, recordChangeTag: `tag-created-${state.modifies.length}` }
           : { ...current, fields: { ...current.fields, ...operation.record.fields }, recordChangeTag: `tag-updated-${state.modifies.length}` };
@@ -204,17 +206,36 @@ export async function verifyReminderWrites(options) {
     assert.deepEqual((await gateDB.prepare("SELECT * FROM apple_session_state").all()).results, gateBefore.results);
     await workerHarness.worker.dispose(); workerHarness = undefined;
 
+    // Older create/edit approval must not silently authorize lifecycle actions.
+    workerHarness = await makeWorker({ lifecycle: false });
+    const legacyGeneration = await workerHarness.seedReady();
+    const legacyStatus = await (await workerHarness.request("/api/connection")).json();
+    assert.equal(legacyStatus.writeEnabled, true);
+    assert.equal(legacyStatus.capabilities.complete, false);
+    const beforeLegacy = await workerHarness.db.prepare("SELECT * FROM apple_session_state").all();
+    for (const action of ["complete", "reopen", "delete"]) {
+      const denied = await workerHarness.mcp("tools/call", { name: `${action}_reminder`, arguments: { listId, reminderId, recordChangeTag: `tag-${reminderId}`, expectedGeneration: legacyGeneration } });
+      assert.equal(denied.result.structuredContent.error.code, "UNSUPPORTED_FEATURE");
+    }
+    assert.deepEqual(workerHarness.state.requests, []);
+    assert.deepEqual((await workerHarness.db.prepare("SELECT * FROM apple_session_state").all()).results, beforeLegacy.results);
+    await workerHarness.worker.dispose(); workerHarness = undefined;
+
     workerHarness = await makeWorker();
     const { request, state, mcp } = workerHarness;
     let generation = await workerHarness.seedReady();
 
     const toolsReply = await mcp("tools/list", {});
     const tools = toolsReply.result.tools;
-    assert.deepEqual(tools.map(tool => tool.name).sort(), ["connection_status", "create_reminder", "get_all_open_reminders", "get_reminder_lists", "get_reminders", "update_reminder"]);
+    assert.deepEqual(tools.map(tool => tool.name).sort(), ["complete_reminder", "connection_status", "create_reminder", "delete_reminder", "get_all_open_reminders", "get_reminder", "get_reminder_lists", "get_reminders", "reopen_reminder", "update_reminder"]);
     const createTool = tools.find(tool => tool.name === "create_reminder");
     const updateTool = tools.find(tool => tool.name === "update_reminder");
     assert.deepEqual({ readOnly: createTool.annotations.readOnlyHint, destructive: createTool.annotations.destructiveHint, idempotent: createTool.annotations.idempotentHint }, { readOnly: false, destructive: false, idempotent: true });
     assert.deepEqual({ readOnly: updateTool.annotations.readOnlyHint, destructive: updateTool.annotations.destructiveHint, idempotent: updateTool.annotations.idempotentHint }, { readOnly: false, destructive: true, idempotent: false });
+    for (const name of ["complete_reminder", "reopen_reminder", "delete_reminder"]) {
+      const annotations = tools.find(tool => tool.name === name).annotations;
+      assert.deepEqual([annotations.readOnlyHint, annotations.destructiveHint, annotations.idempotentHint], [false, true, false]);
+    }
 
     const createKey = "46cf8eef-6cab-4aa2-a725-219769337d8b";
     const createArgs = { listId, idempotencyKey: createKey, title: "Café 🧭 — 東京", notes: "Keep this note 🌿", priority: 1, flagged: true };
@@ -274,7 +295,7 @@ export async function verifyReminderWrites(options) {
     assert.equal((await conflictResponse.json()).error.code, "CONFLICT");
     assert.equal(state.modifies.length, modifyCountAfterEdit + 1);
 
-    // Unsupported completion and linked due-date edits are rejected without modify.
+    // Status changes use their separate tools; linked mutations remain unsupported.
     const beforeUnsupported = state.modifies.length;
     const completionResponse = await request("/api/mutations", { method: "POST", body: { ...editBody, changes: { completed: true } } });
     assert.equal(completionResponse.status, 400);
@@ -284,6 +305,52 @@ export async function verifyReminderWrites(options) {
       assert.equal((await unsupported.json()).error.code, "UNSUPPORTED_FEATURE");
     }
     assert.equal(state.modifies.length, beforeUnsupported);
+
+    // Complete/reopen preserve content; deletion works on a completed record.
+    const lifecycleId = created.result.structuredContent.record.id;
+    const lifecycleTarget = () => ({ listId, reminderId: lifecycleId, recordChangeTag: state.records.get(lifecycleId).recordChangeTag, expectedGeneration: generation });
+    const originalLifecycle = structuredClone(state.records.get(lifecycleId));
+    const firstTarget = lifecycleTarget();
+    const completeReply = await mcp("tools/call", { name: "complete_reminder", arguments: firstTarget });
+    assert.equal(completeReply.result.structuredContent.record.completed, true);
+    const completedLookup = await mcp("tools/call", { name: "get_reminder", arguments: { listId, reminderId: lifecycleId } });
+    assert.equal(completedLookup.result.structuredContent.record.completed, true);
+    assert.ok(!JSON.stringify(completedLookup).includes(opaqueMetadata));
+    assert.ok(Number.isFinite(Date.parse(completeReply.result.structuredContent.record.completedDate)));
+    assert.deepEqual(state.modifies.at(-1).fields, ["Completed", "CompletionDate", "LastModifiedDate", "ResolutionTokenMap"]);
+    assert.equal(state.records.get(lifecycleId).fields.TitleDocument.value, originalLifecycle.fields.TitleDocument.value);
+    assert.equal(state.records.get(lifecycleId).fields.NotesDocument.value, originalLifecycle.fields.NotesDocument.value);
+    const staleDelete = await mcp("tools/call", { name: "delete_reminder", arguments: firstTarget });
+    assert.equal(staleDelete.result.structuredContent.error.code, "CONFLICT");
+    const reopenReply = await mcp("tools/call", { name: "reopen_reminder", arguments: lifecycleTarget() });
+    assert.equal(reopenReply.result.structuredContent.record.completed, false);
+    assert.equal(reopenReply.result.structuredContent.record.completedDate, null);
+    await mcp("tools/call", { name: "complete_reminder", arguments: lifecycleTarget() });
+    const deleteReply = await mcp("tools/call", { name: "delete_reminder", arguments: lifecycleTarget() });
+    assert.equal(deleteReply.result.structuredContent.record.deleted, true);
+    assert.equal(deleteReply.result.structuredContent.record.completed, true);
+    const deletedLookup = await mcp("tools/call", { name: "get_reminder", arguments: { listId, reminderId: lifecycleId } });
+    assert.equal(deletedLookup.result.structuredContent.record.deleted, true);
+    const missingLookup = await mcp("tools/call", { name: "get_reminder", arguments: { listId, reminderId: "Reminder/READ-MISSING" } });
+    assert.deepEqual(missingLookup.result.structuredContent, { generation, record: null, missing: true });
+    state.records.set("List/READ-OTHER", { ...listRecord(), recordName: "List/READ-OTHER" });
+    const wrongList = await mcp("tools/call", { name: "get_reminder", arguments: { listId: "List/READ-OTHER", reminderId: lifecycleId } });
+    assert.equal(wrongList.result.structuredContent.error.code, "FORBIDDEN");
+    state.records.delete("List/READ-OTHER");
+    assert.deepEqual(state.modifies.at(-1).fields, ["Deleted", "LastModifiedDate", "ResolutionTokenMap"]);
+    assert.equal(state.modifies.at(-1).operationType, "update");
+    const beforeLifecycleRefusal = state.modifies.length;
+    for (const id of ["Reminder/WRITE-RECURRING", "Reminder/WRITE-ALARMED"]) {
+      const refused = await mcp("tools/call", { name: "complete_reminder", arguments: { listId, reminderId: id, recordChangeTag: state.records.get(id).recordChangeTag } });
+      assert.equal(refused.result.structuredContent.error.code, "UNSUPPORTED_FEATURE");
+    }
+    const child = reminderRecord("Reminder/WRITE-SUBTASK");
+    child.fields.ParentReminder = field("REFERENCE", { recordName: reminderId, action: "VALIDATE" });
+    state.records.set(child.recordName, child);
+    const nestedRefused = await mcp("tools/call", { name: "delete_reminder", arguments: { listId, reminderId: child.recordName, recordChangeTag: child.recordChangeTag } });
+    assert.equal(nestedRefused.result.structuredContent.error.code, "UNSUPPORTED_FEATURE");
+    state.records.delete(child.recordName);
+    assert.equal(state.modifies.length, beforeLifecycleRefusal);
 
     // Exact IDs survive uncertain 5xx and network failures; retry safely reconciles the committed record.
     for (const [key, mode] of [["9de431a5-27a6-4b40-a23b-7a76a1dcae7d", "committed-500"], ["bb3d717e-1712-4ea2-baa5-8f5728b34f96", "committed-network-drop"]]) {
@@ -368,6 +435,18 @@ export async function verifyReminderWrites(options) {
     assert.equal(state.modifies.length, beforeControlledTest + 2, "Replay and stale-tag checks must not produce extra modifications.");
     assert.equal(state.records.get(controlled.reminderId).fields.Priority.value, 5);
     assert.equal(state.records.get(controlled.reminderId).fields.Flagged.value, 1);
+    const lifecycle = await runControlledLifecycleChecks(invoke, { listId, generation, idempotencyKey: testKey });
+    assert.equal(lifecycle.deleted, true);
+    assert.equal(state.modifies.length, beforeControlledTest + 5);
+    assert.equal(state.records.get(controlled.reminderId).fields.Deleted.value, 1);
+
+    // An uncertain completion must stop the operator procedure before reopen/delete.
+    const lifecycleUncertainKey = randomUUID();
+    await runControlledWriteChecks(invoke, { listId, generation, idempotencyKey: lifecycleUncertainKey });
+    state.nextModify = "committed-network-drop";
+    const beforeUncertainCompletion = state.modifies.length;
+    await assert.rejects(runControlledLifecycleChecks(invoke, { listId, generation, idempotencyKey: lifecycleUncertainKey }), error => error.code === "WRITE_OUTCOME_UNKNOWN");
+    assert.equal(state.modifies.length, beforeUncertainCompletion + 1);
 
     const uncertainKey = randomUUID();
     state.nextModify = "committed-network-drop";
@@ -388,7 +467,9 @@ export async function verifyReminderWrites(options) {
       "MCP-discovery-annotations-Unicode-create-and-idempotent-reconciliation",
       "API-title-edit-preserves-notes-and-opaque-Apple-fields",
       "stale-generation-tag-and-Apple-conflict-have-no-force-retry",
-      "completion-recurring-and-alarmed-date-edits-refused",
+      "complete-reopen-and-version-checked-soft-delete-preserve-content",
+      "legacy-write-approval-denies-lifecycle-actions",
+      "recurrence-alarms-and-nested-state-writes-refused",
       "committed-5xx-and-network-drop-return-unknown-and-reconcile",
       "307-modify-response-never-follows-or-replays",
       "disconnect-fences-preflight-and-modify-confirmation",

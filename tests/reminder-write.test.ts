@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { AppError } from "../src/errors.ts";
 import type { CloudKitRecord } from "../src/icloud/cloudkit.ts";
 import { decodeDocument } from "../src/reminders/crdt.ts";
-import { buildCreateReminder, buildUpdateReminder, CreateReminderInput, matchesCreatedReminder } from "../src/reminders/writes.ts";
+import { buildCreateReminder, buildUpdateReminder, buildLifecycleReminder, CreateReminderInput, matchesCreatedReminder } from "../src/reminders/writes.ts";
 import { parseWriteTestArgs } from "../scripts/dev/validate-local-reminder-writes.mjs";
 
 const owner = "owner-test";
@@ -26,6 +26,8 @@ test("local live-write testing requires explicit confirmation, an exact list nam
   const explicit = parseWriteTestArgs(["--confirm", "--list-name", "MCP Test", "--idempotency-key", baseInput.idempotencyKey]);
   assert.deepEqual(explicit, { listName: "MCP Test", idempotencyKey: baseInput.idempotencyKey });
   assert.match(parseWriteTestArgs(["--confirm", "--list-name", "MCP Test"]).idempotencyKey, /^[0-9a-f-]{36}$/);
+  assert.throws(() => parseWriteTestArgs(["--confirm", "--list-name", "MCP Test", "--finish-existing"]));
+  assert.deepEqual(parseWriteTestArgs(["--confirm", "--list-name", "MCP Test", "--finish-existing", "--idempotency-key", baseInput.idempotencyKey]), { ...explicit, finishExisting: true });
 });
 
 function currentRecord(): CloudKitRecord {
@@ -144,4 +146,34 @@ test("schemas and update builder reject invalid input, conflicts, malformed toke
   const tokenMap = parsedMap(current);
   const unknownTokenMapProperty = { ...current, fields: { ...current.fields, ResolutionTokenMap: { type: "STRING", value: JSON.stringify({ ...tokenMap, future: true }) } } };
   rejectsWithCode(() => buildUpdateReminder(update, unknownTokenMapProperty, owner), "PROTOCOL_CHANGED");
+});
+
+test("completion, reopening and soft deletion preserve content/tokens and enforce exact state and version", () => {
+  const current = currentRecord();
+  const target = { listId: baseInput.listId, reminderId: current.recordName, recordChangeTag: "tag-current" };
+  const now = 1_800_000_100_000;
+  const completed = buildLifecycleReminder("complete", target, current, owner, now);
+  assert.deepEqual(completed.fields.Completed, { type: "INT64", value: 1 });
+  assert.deepEqual(completed.fields.CompletionDate, { type: "TIMESTAMP", value: now });
+  assert.deepEqual(Object.keys(completed.fields).sort(), ["Completed", "CompletionDate", "LastModifiedDate", "ResolutionTokenMap"]);
+  const before = parsedMap(current).map;
+  const tokens = JSON.parse(completed.fields.ResolutionTokenMap.value as string).map;
+  assert.deepEqual(tokens.titleDocument, before.titleDocument);
+  assert.deepEqual(tokens.notesDocument, before.notesDocument);
+  assert.notDeepEqual(tokens.completed, before.completed);
+  const completedRecord = { ...current, fields: { ...current.fields, ...completed.fields } };
+  const reopened = buildLifecycleReminder("reopen", target, completedRecord, owner, now + 1000);
+  assert.deepEqual(reopened.fields.Completed, { type: "INT64", value: 0 });
+  assert.deepEqual(reopened.fields.CompletionDate, { type: "TIMESTAMP", value: null });
+  const deleted = buildLifecycleReminder("delete", target, completedRecord, owner, now + 2000);
+  assert.deepEqual(deleted.fields.Deleted, { type: "INT64", value: 1 });
+  assert.deepEqual(Object.keys(deleted.fields).sort(), ["Deleted", "LastModifiedDate", "ResolutionTokenMap"]);
+  assert.deepEqual(JSON.parse(deleted.fields.ResolutionTokenMap.value as string).map.completed, tokens.completed);
+  const rejects = (action: "complete" | "reopen" | "delete", record: CloudKitRecord, code: string, tag = "tag-current") => assert.throws(() => buildLifecycleReminder(action, { ...target, recordChangeTag: tag }, record, owner), error => error instanceof AppError && error.code === code);
+  rejects("complete", completedRecord, "CONFLICT");
+  rejects("reopen", current, "CONFLICT");
+  rejects("delete", current, "CONFLICT", "stale");
+  rejects("delete", { ...current, fields: { ...current.fields, Deleted: { type: "INT64", value: 1 } } }, "CONFLICT");
+  rejects("complete", { ...current, fields: { ...current.fields, RecurrenceRuleIDs: { type: "STRING_LIST", value: ["RecurrenceRule/RULE-A"] } } }, "UNSUPPORTED_FEATURE");
+  rejects("delete", { ...current, fields: { ...current.fields, ParentReminder: { type: "REFERENCE", value: { recordName: "Reminder/PARENT-A" } } } }, "UNSUPPORTED_FEATURE");
 });

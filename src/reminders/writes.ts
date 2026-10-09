@@ -89,16 +89,21 @@ export const CreateReminderInput = z.object({
   allDay: z.boolean().default(false),
 }).strict();
 
-export const UpdateReminderInput = z.object({
+export const ReminderTargetInput = z.object({
   listId,
   reminderId,
   recordChangeTag: z.string().min(1).max(512).refine(value => !/[\u0000-\u001f\u007f]/.test(value)),
+}).strict();
+
+export const UpdateReminderInput = ReminderTargetInput.extend({
   changes: ReminderChanges,
 }).strict();
 
 export type CreateReminderInputData = z.infer<typeof CreateReminderInput>;
 export type UpdateReminderInputData = z.infer<typeof UpdateReminderInput>;
 export type ReminderChangesData = z.infer<typeof ReminderChanges>;
+export type ReminderTargetInputData = z.infer<typeof ReminderTargetInput>;
+export type ReminderLifecycleAction = "complete" | "reopen" | "delete";
 
 export interface CloudKitWriteRecord {
   recordName: string;
@@ -185,14 +190,14 @@ function assertOwnedReminder(record: CloudKitRecord, expectedOwner: string): voi
   }
 }
 
-function currentReminder(record: CloudKitRecord, expectedOwner: string, listId: string, recordName: string, recordChangeTag: string) {
+function currentReminder(record: CloudKitRecord, expectedOwner: string, listId: string, recordName: string, recordChangeTag: string, expectedCompleted: boolean | null = false) {
   assertOwnedReminder(record, expectedOwner);
   if (record.recordType !== "Reminder" || record.recordName !== recordName || record.deleted === true) {
     throw new AppError("CONFLICT", "The reminder is no longer available for this update.", 409);
   }
   const reminder = normalizeReminder(record, expectedOwner);
-  if (reminder.listId !== listId || reminder.completed !== false || reminder.deleted !== false || reminder.recordChangeTag !== recordChangeTag) {
-    throw new AppError("CONFLICT", "The reminder changed or is no longer open in the requested list.", 409);
+  if (reminder.listId !== listId || typeof reminder.completed !== "boolean" || (expectedCompleted !== null && reminder.completed !== expectedCompleted) || reminder.deleted !== false || reminder.recordChangeTag !== recordChangeTag) {
+    throw new AppError("CONFLICT", "The reminder changed or is no longer in the required state in the requested list.", 409);
   }
   return reminder;
 }
@@ -283,6 +288,30 @@ export function buildUpdateReminder(input: UpdateReminderInputData, current: Clo
   requireValue(tokenFields.length > 0, "The requested reminder changes do not change any fields.");
   fields.LastModifiedDate = { type: "TIMESTAMP", value: nowMs };
   tokenFields.push("lastModifiedDate");
+  fields.ResolutionTokenMap = { type: "STRING", value: updateResolutionTokenMap(current, tokenFields, nowMs) };
+  return { recordName: parsed.reminderId, recordType: "Reminder", recordChangeTag: parsed.recordChangeTag, fields };
+}
+
+export function buildLifecycleReminder(action: ReminderLifecycleAction, input: ReminderTargetInputData, current: CloudKitRecord, expectedOwner: string, nowMs = Date.now()): CloudKitWriteRecord {
+  const parsed = ReminderTargetInput.parse(input);
+  validateNow(nowMs);
+  requireValue(["complete", "reopen", "delete"].includes(action), "Unsupported reminder state change.");
+  const reminder = currentReminder(current, expectedOwner, parsed.listId, parsed.reminderId, parsed.recordChangeTag, action === "delete" ? null : action === "reopen");
+  if ((reminder.recurrenceRuleIds?.length ?? 0) > 0 || (reminder.alarmIds?.length ?? 0) > 0 || reminder.parentReminderId !== null) {
+    throw new AppError("UNSUPPORTED_FEATURE", "Completion, reopening and deletion are unavailable for recurring, alarmed or nested reminders.");
+  }
+  const fields: CloudKitWriteRecord["fields"] = {
+    LastModifiedDate: { type: "TIMESTAMP", value: nowMs },
+  };
+  const tokenFields = ["lastModifiedDate"];
+  if (action === "delete") {
+    fields.Deleted = { type: "INT64", value: 1 };
+    tokenFields.push("deleted");
+  } else {
+    fields.Completed = { type: "INT64", value: action === "complete" ? 1 : 0 };
+    fields.CompletionDate = { type: "TIMESTAMP", value: action === "complete" ? nowMs : null };
+    tokenFields.push("completed", "completionDate");
+  }
   fields.ResolutionTokenMap = { type: "STRING", value: updateResolutionTokenMap(current, tokenFields, nowMs) };
   return { recordName: parsed.reminderId, recordType: "Reminder", recordChangeTag: parsed.recordChangeTag, fields };
 }

@@ -3,7 +3,7 @@
 ## Supported version
 
 Security fixes are applied to the latest version on the default branch. This is an experimental
-integration with reads and opt-in controlled create/edit access. Synthetic test coverage is not
+integration with reads and opt-in controlled reminder mutation access. Synthetic test coverage is not
 an independent cryptographic audit or a production security guarantee.
 
 ## Reporting a vulnerability
@@ -53,12 +53,16 @@ application's local 24-hour session limit.
   to SMS, voice or legacy authentication. Reject missing, mismatched or replayed protocol proofs.
 - Keep the absolute session lifetime bounded. Reads must not extend it. Disconnect must clear
   stored session state; expiry must reject reads and clear expired records on access.
-- Keep reminder writes disabled unless the operator explicitly enables the create/edit gate.
+- Keep reminder writes disabled unless the operator explicitly enables the write gate. The older create/edit approval must not authorize
+  completion, reopening or deletion; those require the separate v2 approval.
   The same owner, current ready session and exact private-zone lookups must precede a write.
   Use only bounded single-record create/update operations, deterministic create IDs and exact
-  record change tags. Never force an edit, replace a record, delete one or automatically replay
+  record change tags. Deletion may only set Apple’s Deleted marker through a normal tagged update.
+  Never force an edit, replace a record, hard-delete one or automatically replay
   a submitted write. Preserve omitted fields and unmodified resolution tokens. Refuse unsupported
-  linked-record date edits rather than updating only part of a recurrence or alarm.
+  linked-record date edits rather than updating only part of a recurrence or alarm. State changes
+  must refuse recurring, alarmed or nested reminders and remain single-record updates. Do not claim
+  parent detection or subtask cascade support; those workflows are outside this interface.
 - Return uncertain outcomes honestly. An in-flight Apple write cannot be undone by local
   disconnect fencing. A timeout, malformed confirmation or lost fence after submission must
   require reconciliation instead of reporting a confirmed failure or success.
@@ -86,7 +90,9 @@ next access, not by a guaranteed timed purge. This project does not revoke Apple
 trust when deleting its local encrypted record.
 
 The experimental write codec follows pinned pyicloud text-document and resolution-token
-algorithms. It has not been independently audited or validated through a live write here.
+algorithms. It has not been independently audited. Bounded live tests for creation, editing,
+completion, reopening and soft deletion have passed with API read-back;
+that result does not establish all linked-record workflows or deployment security.
 Changing a text field replaces that document's formatting; untouched documents remain intact.
 Synthetic checks establish local safeguards and response handling, not Apple's current acceptance.
 Operators must validate a dedicated test reminder before using write access on personal items.

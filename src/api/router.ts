@@ -56,7 +56,7 @@ export async function applicationRoute(request: Request, env: RuntimeEnv, creden
         requireAppleWritesEnabled(env);
         const bytes = await limitedBytes(new Response(request.body, { headers: request.headers }), 65_536);
         let value: unknown;
-        try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new AppError("VALIDATION_ERROR", "Provide a valid reminder create/edit request.", 400); }
+        try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); } catch { throw new AppError("VALIDATION_ERROR", "Provide a valid reminder mutation request.", 400); }
         return json(await new AppleConnectionService(env, owner).mutate(value));
       }
 

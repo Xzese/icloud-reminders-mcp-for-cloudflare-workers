@@ -4,8 +4,8 @@ import { z } from "zod";
 import { AppleConnectionService, ControlledRead } from "../auth/service.ts";
 import { publicError } from "../errors.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
-import { CreateReminderInput, UpdateReminderInput } from "../reminders/writes.ts";
-import { requireAppleWritesEnabled } from "../auth/gates.ts";
+import { CreateReminderInput, UpdateReminderInput, ReminderTargetInput } from "../reminders/writes.ts";
+import { requireAppleWritesEnabled, requireAppleLifecycleWritesEnabled } from "../auth/gates.ts";
 
 export async function handleMCP(request: Request, env: RuntimeEnv, owner: string) {
   const server = new McpServer({ name: "hosted-icloud-reminders", version: "0.1.0" });
@@ -48,9 +48,26 @@ export async function handleMCP(request: Request, env: RuntimeEnv, owner: string
       return { isError: true, structuredContent: { error: result }, content: [{ type: "text" as const, text: result.message }] };
     }
   });
-  const write = async (action: "create" | "update", args: Record<string, unknown>) => {
+  server.registerTool("get_reminder", {
+    title: "Get one current iCloud reminder",
+    description: "Read one exact reminder ID in its list, including completed or soft-deleted items, without scanning list history. Use listId and reminderId from prior results. Returns its normalized content and current recordChangeTag, or record=null and missing=true if Apple reports it absent. Useful to reconcile WRITE_OUTCOME_UNKNOWN before considering another change. No credentials, raw Apple records or write operations are accepted.",
+    inputSchema: ReminderTargetInput.omit({ recordChangeTag: true }).extend({ expectedGeneration }).strict(),
+    annotations: readAnnotations,
+  }, async args => {
+    try {
+      const apple = new AppleConnectionService(env, owner);
+      const generation = args.expectedGeneration ?? (await apple.status()).generation;
+      const result = await apple.readReminderForMCP(generation, args.listId, args.reminderId);
+      return { structuredContent: result, content: [{ type: "text" as const, text: JSON.stringify(result) }] };
+    } catch (error) {
+      const result = publicError(error, crypto.randomUUID());
+      return { isError: true, structuredContent: { error: result }, content: [{ type: "text" as const, text: result.message }] };
+    }
+  });
+  const write = async (action: "create" | "update" | "complete" | "reopen" | "delete", args: Record<string, unknown>) => {
     try {
       requireAppleWritesEnabled(env);
+      if (action !== "create" && action !== "update") requireAppleLifecycleWritesEnabled(env);
       const apple = new AppleConnectionService(env, owner);
       const generation = args.expectedGeneration ?? (await apple.status()).generation;
       const result = await apple.mutate({ ...args, action, expectedGeneration: generation });
@@ -68,11 +85,20 @@ export async function handleMCP(request: Request, env: RuntimeEnv, owner: string
   }, args => write("create", args));
   server.registerTool("update_reminder", {
     title: "Edit an open iCloud reminder",
-    description: "Edit one open reminder using listId, reminderId and the current recordChangeTag from get_reminders. Requires operator-enabled write access. Provide a nonempty changes object with only the fields to edit: title, notes, priority (0/1/5/9), flagged, dueDate, timeZone or allDay. Omitted fields stay unchanged; null clears a date/time zone, and clearing a date also clears its time zone and all-day marker unless explicitly overridden. Text edits replace that field's text formatting; untouched documents are preserved. Date changes on alarmed or recurring reminders are refused because their linked records require a separate protocol. A stale version returns CONFLICT; re-read and review before trying again. WRITE_OUTCOME_UNKNOWN means the change may have saved: read current state first. Never automatically retry with a new version or use force-update. Cannot complete, reopen, delete, move lists or edit linked records.",
+    description: "Edit one open reminder using listId, reminderId and the current recordChangeTag from get_reminders. Requires operator-enabled write access. Provide a nonempty changes object with only the fields to edit: title, notes, priority (0/1/5/9), flagged, dueDate, timeZone or allDay. Omitted fields stay unchanged; null clears a date/time zone, and clearing a date also clears its time zone and all-day marker unless explicitly overridden. Text edits replace that field's text formatting; untouched documents are preserved. Date changes on alarmed or recurring reminders are refused because their linked records require a separate protocol. A stale version returns CONFLICT; re-read and review before trying again. WRITE_OUTCOME_UNKNOWN means the change may have saved: read current state first. Never automatically retry with a new version or use force-update. Use the separate complete_reminder/reopen_reminder/delete_reminder tools for state changes. Cannot move lists or edit linked records.",
     inputSchema: UpdateReminderInput.extend({ expectedGeneration }).strict(),
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
   }, args => write("update", args));
-  server.registerTool("connection_status", { title: "Reminders connection status", description: "Report connection state, session generation and available tools without fetching Apple data. A READY session supports bounded reads; writeEnabled and capabilities.create/update report the operator's explicit create/edit opt-in. Full-product/live acceptance remain separate from tool availability. Read tools start or resume an unfinished catalogue scan and return retryable SYNC_IN_PROGRESS while work remains. Creation and editing never bypass the write gate or accept Apple credentials. Completion, reopening and deletion remain unavailable.", inputSchema: z.object({}).strict(), annotations }, async () => {
+  for (const action of ["complete", "reopen", "delete"] as const) {
+    const operation = action === "complete" ? "Mark one open reminder completed" : action === "reopen" ? "Reopen one completed reminder" : "Delete one open or completed reminder using Apple's Deleted marker";
+    server.registerTool(`${action}_reminder`, {
+      title: `${action === "complete" ? "Complete" : action === "reopen" ? "Reopen" : "Delete"} an iCloud reminder`,
+      description: `${operation}. Requires the separate controlled-reminder-writes-v2 operator approval, a ready Apple session, listId, reminderId and the latest recordChangeTag from get_reminder or get_reminders. Use get_reminder for exact completed-item lookup, or includeCompleted=true to page list history. Preserves omitted content and resolution tokens. Recurring, alarmed and nested reminders are refused. This sends one tagged record update; it does not enumerate or update children. Parent/subtask workflows are unsupported; use Apple's app for them. No parent detection or cascade support is claimed. A stale version returns CONFLICT; read and review before another request. WRITE_OUTCOME_UNKNOWN means Apple may have saved the action: reconcile the exact ID first. Never automatically retry with a fresh tag or force a write. Deletion is a soft, version-checked update; no hard-delete or restore tool is exposed.`,
+      inputSchema: ReminderTargetInput.extend({ expectedGeneration }).strict(),
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+    }, args => write(action, args));
+  }
+  server.registerTool("connection_status", { title: "Reminders connection status", description: "Report connection state, session generation and available tools without fetching Apple data. A READY session supports bounded reads; writeEnabled and capabilities report operator opt-in. controlled-create-edit-v1 permits creation/editing; controlled-reminder-writes-v2 also permits completion/reopening/deletion. Full-product/live acceptance remain separate from tool availability. Read tools start or resume an unfinished catalogue scan and return retryable SYNC_IN_PROGRESS while work remains. Mutation tools never bypass their write gate or accept Apple credentials.", inputSchema: z.object({}).strict(), annotations }, async () => {
     try {
       const result = await new AppleConnectionService(env, owner).status();
       return { structuredContent: result, content: [{ type: "text", text: result.message }] };

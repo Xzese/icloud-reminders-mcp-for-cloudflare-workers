@@ -6,6 +6,16 @@ export function localAppleHeaders(input) {
   headers.delete("cf-worker");
   return headers;
 }
+export function summarizeAppleFailure(url, { stage, status, bytesRead, elapsedMs, timeout, aborted, error }) {
+  return {
+    at: new Date().toISOString(), host: url.hostname, path: url.pathname, event: "local-apple-request-failed",
+    stage: ["headers", "body", "observation"].includes(stage) ? stage : "unknown",
+    status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null,
+    bytesRead: Number.isSafeInteger(bytesRead) && bytesRead >= 0 ? bytesRead : null,
+    elapsedMs: Number.isSafeInteger(elapsedMs) && elapsedMs >= 0 ? elapsedMs : null,
+    failure: error?.code === "LOCAL_RESPONSE_BYTE_BUDGET" ? "response-byte-budget" : timeout ? "timeout" : aborted ? "incoming-abort" : "transport-failure",
+  };
+}
 export function summarizeAppleResponse(url, status, body) {
   const result = { at: new Date().toISOString(), host: url.hostname, path: url.pathname, status };
   if (!body || typeof body !== "object" || Array.isArray(body)) return result;

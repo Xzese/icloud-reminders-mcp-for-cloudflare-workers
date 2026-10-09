@@ -4,8 +4,9 @@ export function appleGates(env: RuntimeEnv) {
   const liveConnectionApproved = env.LIVE_APPLE_CONNECTION_APPROVED === "controlled-device-v2";
   const cryptographyReviewed = env.APPLE_CRYPTO_REVIEW_APPROVED === "device-proof-v2";
   const enabled = liveConnectionApproved && cryptographyReviewed;
-  const writesEnabled = enabled && env.LIVE_APPLE_WRITES_APPROVED === "controlled-create-edit-v1";
-  return { enabled, liveConnectionApproved, cryptographyReviewed, writesEnabled, loginPolicy: "device-only-v2", verificationMethod: "trusted-device-spake2", passwordLocation: "browser-only", sessionStorage: "owner-scoped-encrypted", sessionLifetimeMs: 86_400_000, socketLifetimeMs: 180_000 } as const;
+  const lifecycleWritesEnabled = enabled && env.LIVE_APPLE_WRITES_APPROVED === "controlled-reminder-writes-v2";
+  const writesEnabled = lifecycleWritesEnabled || (enabled && env.LIVE_APPLE_WRITES_APPROVED === "controlled-create-edit-v1");
+  return { enabled, liveConnectionApproved, cryptographyReviewed, writesEnabled, lifecycleWritesEnabled, loginPolicy: "device-only-v2", verificationMethod: "trusted-device-spake2", passwordLocation: "browser-only", sessionStorage: "owner-scoped-encrypted", sessionLifetimeMs: 86_400_000, socketLifetimeMs: 180_000 } as const;
 }
 export function appleDisabledMessage(gates: ReturnType<typeof appleGates>) {
   return gates.cryptographyReviewed
@@ -19,4 +20,8 @@ export function requireAppleEnabled(env: RuntimeEnv) {
 export function requireAppleWritesEnabled(env: RuntimeEnv) {
   requireAppleEnabled(env);
   if (!appleGates(env).writesEnabled) throw new AppError("UNSUPPORTED_FEATURE", "Reminder creation and editing are disabled. The operator must explicitly enable controlled create/edit access.", 403);
+}
+export function requireAppleLifecycleWritesEnabled(env: RuntimeEnv) {
+  requireAppleWritesEnabled(env);
+  if (!appleGates(env).lifecycleWritesEnabled) throw new AppError("UNSUPPORTED_FEATURE", "Completion, reopening and deletion are disabled. The operator must explicitly enable controlled-reminder-writes-v2.", 403);
 }

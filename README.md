@@ -21,14 +21,14 @@ are fetched from Apple when requested and are not cached in D1.
 **Experimental, unofficial integration.** This project uses Apple's undocumented web protocols,
 not Sign in with Apple or an official Reminders API. The login page is served by your deployment;
 you must trust its browser code with your password input. Cryptographic reference tests are not an
-independent security audit. Creating and editing are experimental and disabled by default.
-Completing, reopening and deleting reminders remain unavailable.
+independent security audit. Creating, editing, completing, reopening and soft-deleting reminders are experimental and
+disabled by default. State changes require the separate v2 write approval.
 
 ## Table of contents
 
 - [Public source, private deployments](#public-source-private-deployments)
 - [Tools](#tools)
-- [Create and edit access](#create-and-edit-access)
+- [Reminder write access](#reminder-write-access)
 - [Resources and configuration](#resources-and-configuration)
 - [Local setup](#local-setup)
 - [ChatGPT Sites setup](#chatgpt-sites-setup)
@@ -63,10 +63,14 @@ Review Git history before publishing a repository that previously contained priv
 | --- | --- |
 | `connection_status` | Report connection state, session generation and read availability; does not contact Apple. |
 | `get_reminder_lists` | Start/resume catalogue synchronization, then return discovered current selectable lists. |
+| `get_reminder` | Read one exact ID, including completed or soft-deleted state, for current version tags and recovery. |
 | `get_reminders` | Synchronize the catalogue, then fetch one current page for a `listId`; open reminders by default. |
 | `get_all_open_reminders` | Synchronize the catalogue, then fetch open reminders across every discovered selectable list. |
 | `create_reminder` | Create one open reminder using a stable UUID `idempotencyKey`; requires write opt-in. |
 | `update_reminder` | Edit specified fields of one open reminder using its current `recordChangeTag`; requires write opt-in. |
+| `complete_reminder` | Complete one open reminder using its current version; requires v2 write opt-in. |
+| `reopen_reminder` | Reopen one completed reminder and clear its completion date; requires v2 write opt-in. |
+| `delete_reminder` | Soft-delete one open or completed reminder using its current version; requires v2 write opt-in. |
 
 Tools return `structuredContent` plus a text copy for client compatibility. Use the IDs returned
 by `get_reminder_lists`. `get_reminders` accepts `includeCompleted`, `limit` (1â€“200) and its returned
@@ -74,28 +78,33 @@ by `get_reminder_lists`. `get_reminders` accepts `includeCompleted`, `limit` (1â
 call `get_all_open_reminders` again with that value and combine the returned records. Inspect errors
 before retrying and respect any `retryAfterSeconds`. A partial result is not the entire collection.
 
-## Create and edit access
+## Reminder write access
 
 Writes default to disabled in both deployment modes and the local launcher. After reviewing
 [the write protocol and limitations](docs/write-access.md), set the runtime variable
-`LIVE_APPLE_WRITES_APPROVED=controlled-create-edit-v1` alongside the two existing Apple login
+`LIVE_APPLE_WRITES_APPROVED=controlled-reminder-writes-v2` alongside the two existing Apple login
 approvals. Set it through Sites' private runtime configuration or your ignored standalone
 configuration; keep the checked-in template empty. `connection_status` then reports
-`writeEnabled` and `capabilities.create/update` when the Apple session is ready.
+`writeEnabled` and the create/update/complete/reopen/delete capabilities when the Apple session is ready.
 
 Use `get_reminder_lists` to select a list and `get_reminders` to obtain reminder IDs and current
 version tags. Creates need a new UUID `idempotencyKey` for each distinct reminder; reuse that
 same key and content after an uncertain result. Updates need the last-read `recordChangeTag`
-and a nonempty `changes` object. Only specified fields change. Supported fields are title, notes,
+and a nonempty `changes` object. `get_reminder` reads the exact current item, including completed
+or soft-deleted state, without scanning history. Only specified fields change. Supported fields are title, notes,
 priority, flag, due date, time zone and all-day status. Date edits on recurring or alarmed
-reminders are refused. Completion, deletion, moving lists and linked-record editing are excluded.
+reminders are refused. Completion, reopening and deletion refuse recurring, alarmed and nested
+reminders, and send one tagged record update. They do not detect parents or implement subtask
+cascades; use Apple's app for parent/subtask workflows. Deletion sets Apple's `Deleted` marker
+with a normal update; no hard-delete or restore tool is exposed. Moving lists and linked-record
+editing are excluded.
 
 `CONFLICT` requires a fresh read and review. `WRITE_OUTCOME_UNKNOWN` means Apple may have saved
 the change: read the indicated reminder before retrying, and never choose a new creation key
-for that attempt. Neither tool automatically retries writes or bypasses version conflicts.
-Synthetic acceptance does not establish live write interoperability; review the PR and use a
-dedicated test reminder for your first live test. The [local acceptance procedure](docs/write-access.md#local-live-acceptance)
-includes a command that creates and edits only its own test item.
+for that attempt. No mutation tool automatically retries writes or bypasses version conflicts.
+Review the PR and use a dedicated test reminder for your first live test. The [local acceptance procedure](docs/write-access.md#local-live-acceptance)
+includes a command that creates, edits, completes, reopens and deletes only its own test item.
+The older `controlled-create-edit-v1` approval remains limited to creation and editing.
 
 ## Resources and configuration
 
@@ -120,7 +129,7 @@ cryptography and your Access configuration; validate those limits in your deploy
 | `ENCRYPTION_KEYS_JSON` **secret** | JSON key ring, for example `{"primary":"<32-byte base64 key>"}`. |
 | `LIVE_APPLE_CONNECTION_APPROVED` | `controlled-device-v2` enables the operator-approved account test. |
 | `APPLE_CRYPTO_REVIEW_APPROVED` | `device-proof-v2` acknowledges the operator's review of the browser proof protocol. |
-| `LIVE_APPLE_WRITES_APPROVED` | Optional: `controlled-create-edit-v1` enables bounded create/edit tools after operator review. Empty by default. |
+| `LIVE_APPLE_WRITES_APPROVED` | Optional: `controlled-reminder-writes-v2` enables bounded mutations after operator review; `controlled-create-edit-v1` enables only create/edit. Empty by default. |
 | `TEAM_DOMAIN` | Standalone only: `https://<team>.cloudflareaccess.com`. |
 | `POLICY_AUD` | Standalone only: Access application's audience tag. |
 | `CATALOGUE_BACKGROUND_RUNNER` | Optional: `cron` only with an actual standalone Cron trigger; local launcher sets `local`. |
@@ -163,7 +172,7 @@ the stored session. Its ignored `.sites-runtime/local-icloud/` is private accoun
 
 Local tests and CI use synthetic data and do not require an Apple account.
 
-To explicitly opt into controlled local create/edit testing after reviewing the protocol:
+To explicitly opt into controlled local reminder-write testing after reviewing the protocol:
 
 ```bash
 npm run build
@@ -430,7 +439,7 @@ src/
   lib/               Shared utilities and connector helpers
   types/             Application and Worker type declarations
   api/               Authenticated API routing
-  mcp/               MCP reads and gated create/edit tools
+  mcp/               MCP reads and gated reminder mutation tools
   auth/              Apple authentication and catalogue synchronization
   crypto/            Protocol cryptography and encrypted storage envelopes
   icloud/            CloudKit transport and record normalization
