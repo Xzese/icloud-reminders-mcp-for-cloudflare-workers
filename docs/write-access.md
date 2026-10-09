@@ -139,7 +139,7 @@ and [annotation definitions](https://modelcontextprotocol.io/specification/2025-
 2. Run `npm run install:ci` and `npm run build`. Stop any earlier local Worker, then launch
    `npm run dev:icloud`. It uses a separate encrypted local session.
 3. Open `http://127.0.0.1:5173/`, finish Apple sign-in/device approval if required, and wait
-   for **Ready** and a finished catalogue scan.
+   for **Ready**, then retrieve the current lists.
 4. Explicitly run the one-item test:
 
    ```bash
@@ -170,7 +170,7 @@ item has already been completed, altered or deleted, it stops; inspect its curre
 `WRITE_OUTCOME_UNKNOWN` may mean Apple saved the operation. Reconcile the printed exact ID
 before another request; do not create a fresh key. To reconcile uncertain creation, the same
 key can be supplied without `--finish-existing`, but changed/completed/deleted content returns
-`CONFLICT` and stops. `SYNC_IN_PROGRESS` means scanning must finish before another test.
+`CONFLICT` and stops. If direct list retrieval fails or is incomplete, resolve it before testing writes.
 
 ## Protocol reference and acceptance
 

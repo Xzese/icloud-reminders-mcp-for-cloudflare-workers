@@ -183,7 +183,7 @@ async function runCLI() {
   const status = await invoke("connection_status", {});
   requireTest(status.state === "READY" && status.writeEnabled === true && status.capabilities?.complete === true && status.capabilities?.reopen === true && status.capabilities?.delete === true, "Sign in locally and launch the current build with npm run dev:icloud before this test.");
   const lists = await invoke("get_reminder_lists", { expectedGeneration: status.generation });
-  requireTest(lists.paginationComplete === true && Array.isArray(lists.records) && Array.isArray(lists.recordErrors) && lists.recordErrors.length === 0, "Finish the catalogue scan before testing writes.");
+  requireTest(lists.paginationComplete === true && Array.isArray(lists.records) && Array.isArray(lists.recordErrors) && lists.recordErrors.length === 0, "Retrieve a complete current list set before testing writes.");
   const candidates = lists.records.filter(list => list.title === listName && !list.deleted && !list.isGroup);
   requireTest(candidates.length === 1, "Choose one uniquely named dedicated test list; no list was selected automatically.");
   // Retain this synthetic identity even when a response is lost. No account data is logged.
