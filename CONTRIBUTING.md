@@ -76,6 +76,8 @@ another. Its metadata-only workflow enables squash auto-merge for routine update
 repository's Dependabot bot; all four protected-branch checks must pass against an up-to-date
 branch. Failed checks remain blocked. Major upgrades require manual review and are not opted into
 auto-merge. Keep the write-token workflow free of PR checkouts, installs or scripts from PR branches.
+Minor/patch npm security fixes use their own grouped PR and the same merge gates; they do not
+wait for the weekly version-update schedule. Major security upgrades still require manual review.
 
 The acceptance runners and local launcher use the explicitly declared Miniflare 4 API and
 Undici dependencies. Keep Miniflare major upgrades in a reviewed migration rather than
