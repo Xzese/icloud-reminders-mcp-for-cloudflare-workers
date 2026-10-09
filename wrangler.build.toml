@@ -1,0 +1,3 @@
+# Framework builds inject entrypoint and local bindings through vite.config.ts.
+name = "icloud-reminders-mcp-server"
+compatibility_date = "2026-05-15"

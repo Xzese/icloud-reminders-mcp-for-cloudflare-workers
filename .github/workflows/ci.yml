@@ -1,0 +1,27 @@
+name: CI
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm run install:ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run public-config:check
+      - run: npm run build
+      - run: npm run test:worker
+      - run: npm run test:local
+      - run: npm run verify:artifact
+      - run: npm run build:check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-worker-evidence
+          path: docs/artifact-manifest.json

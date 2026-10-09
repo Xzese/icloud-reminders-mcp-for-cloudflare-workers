@@ -1,0 +1,8 @@
+# Development only. Use local_seedy only with the starter's loopback sign-in mock.
+REMINDERS_OWNER_ID="local_seedy"
+APP_ORIGIN="http://127.0.0.1:5173"
+ENCRYPTION_KEY_ID="local-synthetic"
+# Supply a locally generated 32-byte base64 key in the ignored .dev.vars file.
+ENCRYPTION_KEYS_JSON=
+LIVE_APPLE_CONNECTION_APPROVED=
+APPLE_CRYPTO_REVIEW_APPROVED=
