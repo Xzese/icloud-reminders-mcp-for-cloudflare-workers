@@ -7,10 +7,11 @@ import { CloudKitRateLimitedError, CloudKitRemindersClient, normalizeList, norma
 import { CreateReminderInput, UpdateReminderInput, ReminderTargetInput, buildCreateReminder, buildUpdateReminder, buildLifecycleReminder, matchesCreatedReminder, type CloudKitWriteRecord } from "../reminders/writes.ts";
 import { decodeDocument } from "../reminders/crdt.ts";
 import { AppleAuthHTTP } from "./apple/http.ts";
-import { advancePcs } from "./apple/pcs.ts";
+import { advancePcs, freshPcsCheckpoint } from "./apple/pcs.ts";
+import { AppleSessionRenewal, appleRequestBudget, appleSuccess, renewalCheckpoint, type AppleRequestBudget } from "./apple/session-renewal.ts";
 import { appleDisabledMessage, appleGates, requireAppleEnabled } from "./gates.ts";
 
-export const ResumeRequest = z.object({ expectedGeneration: z.number().int().nonnegative().safe() }).strict();
+export const ResumeRequest = z.object({ expectedGeneration: z.number().int().nonnegative().safe(), restartApproval: z.boolean().optional() }).strict();
 export const ReminderMutation = z.discriminatedUnion("action", [
   CreateReminderInput.extend({ action: z.literal("create"), expectedGeneration: ResumeRequest.shape.expectedGeneration }).strict(),
   UpdateReminderInput.extend({ action: z.literal("update"), expectedGeneration: ResumeRequest.shape.expectedGeneration }).strict(),
@@ -21,6 +22,8 @@ export const ReminderMutation = z.discriminatedUnion("action", [
 const common = { expectedGeneration: z.number().int().nonnegative().safe(), continuation: z.string().min(1).max(8192).nullable().optional(), limit: z.number().int().min(1).max(200).default(200) };
 const listIdSchema = z.string().min(6).max(512).regex(/^List\/[^/\u0000-\u0020\u007f]+$/);
 const authenticationFailure = (error: unknown) => error instanceof AppError && ["REAUTH_REQUIRED", "AUTH_EXPIRED", "TERMS_ACTION_REQUIRED", "VERIFICATION_REQUIRED"].includes(error.code);
+type OperationMode = "read-only" | "mutation-preparation" | "cursor-progress" | "pcs" | "snapshot";
+interface OperationStage { phase: OperationMode | "mutation-dispatch" | "mutation-confirmation"; dispatch(): void; confirm(): void; }
 export const ControlledRead = z.discriminatedUnion("action", [
   z.object({ action: z.literal("discover"), expectedGeneration: common.expectedGeneration }).strict(),
   z.object({ action: z.literal("saved-lists"), expectedGeneration: common.expectedGeneration }).strict(),
@@ -103,16 +106,29 @@ export class AppleConnectionService {
   async status() {
     const gates = appleGates(this.env);
     const session = await new AppleSessionRepository(this.env, this.owner).status();
-    const readsAvailable = gates.enabled && session.transportReady;
+    const readsAvailable = gates.enabled && session.transportReady && !["apple-sign-in", "verify-device", "review-terms"].includes(session.requiredAction ?? "") && !(session.nextRetryAt && session.nextRetryAt > Date.now());
     const connection = omitField(session, "liveReadValidated");
     const writesAvailable = readsAvailable;
-    return { ...connection, listDiscovery: { strategy: "direct", liveValidated: false, experimental: true }, gates, connected: readsAvailable, writeEnabled: writesAvailable, phase: writesAvailable ? "read-write" : "read-only", capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: writesAvailable, update: writesAvailable, complete: writesAvailable, reopen: writesAvailable, delete: writesAvailable }, mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_reminder", "get_all_open_reminders", "create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "delete_reminder"], message: !gates.enabled ? appleDisabledMessage(gates) : session.state === "READY" ? "You can read, create, edit, complete, reopen and delete reminders. Use current IDs and version tags." : session.state === "DEVICE_APPROVAL_PENDING" ? (session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again.") : "Connect your Apple account through the private Site's secure connection form." };
+    const actionMessage = session.requiredAction === "local-retention-expired" ? "The fixed local retention window expired. Sign in and verify your device again."
+      : session.requiredAction === "apple-sign-in" || session.requiredAction === "verify-device" ? "Sign in again or complete the required device verification to use this Apple connection."
+      : session.requiredAction === "review-terms" ? "Review Apple's updated terms in the official iCloud interface."
+      : session.requiredAction === "retry" && session.nextRetryAt && session.nextRetryAt > Date.now() ? "Apple or the network is temporarily unavailable. The saved connection is preserved; wait until the retry time."
+      : null;
+    return { ...connection, listDiscovery: { strategy: "direct", liveValidated: false, experimental: true }, gates,
+      connected: gates.enabled && session.transportReady, writeEnabled: writesAvailable, phase: writesAvailable ? "read-write" : "read-only",
+      capabilities: { liveRead: readsAvailable, controlledRead: readsAvailable, listReminders: readsAvailable, allOpenReminders: readsAvailable, search: false, create: writesAvailable, update: writesAvailable, complete: writesAvailable, reopen: writesAvailable, delete: writesAvailable },
+      mcpTools: ["connection_status", "get_reminder_lists", "get_reminders", "get_reminder", "get_all_open_reminders", "create_reminder", "update_reminder", "complete_reminder", "reopen_reminder", "delete_reminder"],
+      message: !gates.enabled ? appleDisabledMessage(gates) : actionMessage ?? (session.state === "READY"
+        ? "You can read, create, edit, complete, reopen and delete reminders. Use current IDs and version tags."
+        : session.state === "DEVICE_APPROVAL_PENDING"
+          ? session.action === "wait-for-reminders-keys" ? "Apple accepted device approval. Check again shortly while Apple makes the Reminders keys available." : "Approve Apple's web-access prompt on your device, then check approval again."
+          : "Connect your Apple account through the private Site's secure connection form.") };
   }
   async disconnect() { return await new AppleSessionRepository(this.env, this.owner).disconnect(); }
   async readReminderForMCP(expectedGeneration: number, listId: string, reminderId: string) {
     const parsed = ReminderTargetInput.omit({ recordChangeTag: true }).safeParse({ listId, reminderId });
     if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Provide exact canonical list and reminder IDs.", 400);
-    return this.operation(expectedGeneration, "read", async (http, saved, repository, fence) => {
+    return this.operation(expectedGeneration, "read-only", async (http, saved, repository, fence) => {
       const client = new CloudKitRemindersClient(http.http, saved.session.connection);
       if (client.remindersZoneOwner === undefined && !(await client.listZones()).available) throw new AppError("PROTOCOL_CHANGED", "Apple did not return an available private Reminders zone.");
       const found = await client.lookup([listId, reminderId]);
@@ -126,7 +142,7 @@ export class AppleConnectionService {
         if (normalized.listId !== listId) throw new AppError("FORBIDDEN", "The reminder does not belong to the requested list.", 403);
         record = normalized;
       }
-      await repository.commitResume(fence, { ...saved.session, connection: { ...saved.session.connection, remindersZoneOwner: client.remindersZoneOwner }, auth: http.snapshot() }, "READY");
+      await repository.commitResume(fence, appleSuccess({ ...saved.session, connection: { ...saved.session.connection, remindersZoneOwner: client.remindersZoneOwner }, auth: http.snapshot() }), "READY");
       return { generation: fence.generation, record, missing: record === null };
     });
   }
@@ -139,7 +155,7 @@ export class AppleConnectionService {
     const targetId = input.action === "create" ? `Reminder/${input.idempotencyKey.toUpperCase()}` : input.reminderId;
     let applied = false;
     try {
-      return await this.operation(input.expectedGeneration, "read", async (http, saved, repository, fence) => {
+      return await this.operation(input.expectedGeneration, "mutation-preparation", async (http, saved, repository, fence, stage) => {
         const client = new CloudKitRemindersClient(http.http, saved.session.connection);
         let connection = saved.session.connection;
         if (client.remindersZoneOwner === undefined) {
@@ -165,7 +181,9 @@ export class AppleConnectionService {
             confirmed = current; replayed = true;
           } else {
             await repository.assertWriteLease(fence);
+            stage.dispatch();
             confirmed = await client.modifyReminder("create", write);
+            stage.confirm();
             applied = true;
             if (!matchesCreatedReminder(create, confirmed, owner)) throw new WriteOutcomeUnknownError(targetId, input.idempotencyKey);
           }
@@ -177,7 +195,9 @@ export class AppleConnectionService {
             write = buildLifecycleReminder(input.action, update, current!, owner);
           }
           await repository.assertWriteLease(fence);
+          stage.dispatch();
           confirmed = await client.modifyReminder("update", write);
+          stage.confirm();
           applied = true;
           verifyWriteFields(write, confirmed, current!, owner, input.listId);
         }
@@ -185,7 +205,7 @@ export class AppleConnectionService {
         const session = omitField(saved.session, "allOpenScan");
         // A confirmation and cookie save share the existing owner/generation
         // fence. A lost fence after dispatch reports uncertainty, not success.
-        await repository.commitResume(fence, { ...session, connection, auth: http.snapshot() }, "READY");
+        await repository.commitResume(fence, appleSuccess({ ...session, connection, auth: http.snapshot() }), "READY");
         return { generation: fence.generation, operation: input.action, replayed, record, writesEnabled: true, ...(input.action === "create" ? { idempotencyKey: input.idempotencyKey } : {}) };
       });
     } catch (error) {
@@ -193,24 +213,60 @@ export class AppleConnectionService {
       throw error;
     }
   }
-  private async operation<T>(expectedGeneration: number, mode: "read" | "pcs", run: (http: AppleAuthHTTP, saved: Awaited<ReturnType<AppleSessionRepository["load"]>>, repository: AppleSessionRepository, fence: ResumeFence) => Promise<T>) {
+  private async operation<T>(expectedGeneration: number, mode: OperationMode, run: (http: AppleAuthHTTP, saved: Awaited<ReturnType<AppleSessionRepository["load"]>>, repository: AppleSessionRepository, fence: ResumeFence, stage: OperationStage) => Promise<T>, budget = appleRequestBudget()) {
     requireAppleEnabled(this.env);
     const repository = new AppleSessionRepository(this.env, this.owner);
-    const saved = await repository.load();
-    if (saved.fence.generation !== expectedGeneration) throw new AppError("CONFLICT", "The Apple session changed. Refresh status before continuing.", 409);
-    if (mode === "pcs" && Date.now() < saved.session.pcs.nextAttemptAt) throw new AppError("RATE_LIMITED", "Wait until the displayed retry time before checking approval.", 429, true);
-    const fence = mode === "pcs" ? await repository.claimResume(expectedGeneration, saved.fence.version) : await repository.claimRead(expectedGeneration, saved.fence.version);
-    const http = AppleAuthHTTP.restore(saved.session.auth);
-    try { return await run(http, saved, repository, fence); }
-    catch (error) {
-      if (authenticationFailure(error)) await repository.invalidate(fence);
-      throw error;
-    } finally { await repository.releaseResume(fence); }
+    const renewal = new AppleSessionRenewal(this.env, repository);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const saved = mode === "snapshot" ? await repository.load() : await renewal.ensure(expectedGeneration, budget);
+      if (saved.fence.generation !== expectedGeneration) throw new AppError("CONFLICT", "The Apple connection changed before this operation.", 409);
+      if (budget.deadline <= Date.now()) throw new AppError("UPSTREAM_UNAVAILABLE", "The Apple request deadline was reached.", 503, true);
+      if (mode === "pcs" && Date.now() < saved.session.pcs.nextAttemptAt) throw new AppError("RATE_LIMITED", "Wait until the displayed retry time before checking approval.", 429, true);
+      const fence = mode === "pcs" ? await repository.claimResume(expectedGeneration, saved.fence.version) : await repository.claimRead(expectedGeneration, saved.fence.version);
+      const http = AppleAuthHTTP.restore(saved.session.auth, fetch, AbortSignal.timeout(budget.deadline - Date.now()));
+      const stage: OperationStage = {
+        phase: mode,
+        dispatch() {
+          if (budget.deadline - Date.now() < 9000) throw new AppError("CONFLICT", "The complete request budget is too short for a write. No mutation was dispatched.", 409, true);
+          this.phase = "mutation-dispatch";
+        },
+        confirm() { this.phase = "mutation-confirmation"; },
+      };
+      let recover = false;
+      try { return await run(http, saved, repository, fence, stage); }
+      catch (error) {
+        const dispatched = stage.phase === "mutation-dispatch" || stage.phase === "mutation-confirmation";
+        if (error instanceof AppError && error.code === "AUTH_EXPIRED") await repository.invalidate(fence, "local-retention-expired");
+        if (!dispatched && error instanceof AppError && error.code === "REAUTH_REQUIRED" && appleGates(this.env).renewalEnabled && attempt === 0 && !budget.recoveryUsed) {
+          recover = true;
+        } else if (!dispatched && error instanceof AppError && error.code === "DEVICE_APPROVAL_PENDING") {
+          await repository.releaseResume(fence);
+          await renewal.requireDataApproval(expectedGeneration, budget);
+        }
+        if (!recover && !dispatched && error instanceof AppError && error.code === "REAUTH_REQUIRED" && appleGates(this.env).renewalEnabled) {
+          const metadata = saved.session.renewal ?? renewalCheckpoint();
+          const failures = Math.min(8, metadata.failures + 1);
+          await repository.commitResume(fence, { ...saved.session, auth: { ...saved.session.auth, cookies: http.snapshot().cookies },
+            renewal: { ...metadata, failures, requiredAction: "retry", lastErrorCode: "UPSTREAM_UNAVAILABLE",
+              nextRetryAt: Date.now() + Math.min(3_600_000, 30_000 * 2 ** (failures - 1)) } }, saved.state, saved.action ?? undefined);
+        }
+        if (!recover) throw error;
+        await repository.releaseResume(fence);
+        await renewal.ensure(expectedGeneration, budget, true);
+        // Cursor callbacks may have acknowledged progress. Never replay them,
+        // even if authentication has now recovered.
+        if (mode === "cursor-progress" || mode === "pcs") throw new AppError("RESTART_REQUIRED", "Apple authentication recovered. Resume using the current continuation or approval state; this callback was not replayed.", 409);
+      } finally { await repository.releaseResume(fence); }
+    }
+    throw new AppError("REAUTH_REQUIRED", "Apple rejected the operation after one recovery cycle. No automatic retry remains.", 409);
   }
-  async resume(expectedGeneration: number) {
+  async resume(expectedGeneration: number, restartApproval = false) {
     await this.operation(expectedGeneration, "pcs", async (http, saved, repository, fence) => {
-      const result = await advancePcs(http, saved.session.connection.dsid, saved.session.pcs);
-      await repository.commitResume(fence, { ...saved.session, auth: http.snapshot(), pcs: result.checkpoint }, result.state, result.state === "DEVICE_APPROVAL_PENDING" ? result.action : undefined);
+      if (saved.session.pcs.expiresAt <= Date.now() && !restartApproval) throw new AppError("RESTART_REQUIRED", "This Reminders approval attempt expired. Use Check Apple approval to start a new bounded attempt; the Apple account connection is preserved.", 409);
+      const checkpoint = saved.session.pcs.expiresAt <= Date.now() ? freshPcsCheckpoint() : saved.session.pcs;
+      const result = await advancePcs(http, saved.session.connection.dsid, checkpoint);
+      await repository.commitResume(fence, appleSuccess({ ...saved.session, auth: http.snapshot(), pcs: result.checkpoint,
+        renewal: { ...(saved.session.renewal ?? renewalCheckpoint()), requiredAction: result.state === "READY" ? null : "approve-reminders", lastErrorCode: null } }), result.state, result.state === "DEVICE_APPROVAL_PENDING" ? result.action : undefined);
     });
     return this.status();
   }
@@ -227,9 +283,9 @@ export class AppleConnectionService {
       auth: http.snapshot() } };
   }
   async getCurrentLists(expectedGeneration: number): Promise<MCPReadResult> {
-    return this.operation(expectedGeneration, "read", async (http, saved, repository, fence) => {
+    return this.operation(expectedGeneration, "read-only", async (http, saved, repository, fence) => {
       const current = await this.fetchDirectLists(http, saved.session);
-      await repository.commitResume(fence, current.session, "READY");
+      await repository.commitResume(fence, appleSuccess(current.session), "READY");
       return { result: { records: current.records, recordErrors: [], complete: true, paginationComplete: true,
         continuation: null, pendingReason: null, source: "direct-cloudkit-query", freshness: { mode: "live", retrievedAt: current.session.directListSnapshot.updatedAt },
         listDiscovery: { strategy: "direct", experimental: true, retrievedAt: current.session.directListSnapshot.updatedAt }, pagesRead: current.pagesRead },
@@ -244,10 +300,21 @@ export class AppleConnectionService {
     }
     return this.getCurrentLists(input.expectedGeneration);
   }
-  private async startAllOpenScan(expectedGeneration: number, continuation: string | null) {
-    return this.operation(expectedGeneration, "read", async (http, saved, repository, fence) => {
+  private async startAllOpenScan(expectedGeneration: number, continuation: string | null, budget: AppleRequestBudget) {
+    if (continuation) {
+      const repository = new AppleSessionRepository(this.env, this.owner);
+      const saved = await repository.load();
+      if (saved.fence.generation !== expectedGeneration || saved.session.allOpenScan?.token !== continuation) throw new AppError("CONFLICT", "The all-open continuation was replaced or already used.", 409);
+      if (saved.session.allOpenScan.expiresAt <= Date.now()) {
+        const fence = await repository.claimRead(expectedGeneration, saved.fence.version);
+        try { await repository.commitResume(fence, omitField(saved.session, "allOpenScan"), "READY"); }
+        finally { await repository.releaseResume(fence); }
+        throw new AppError("RESTART_REQUIRED", "The ten-minute all-open read expired. Start a new all-open read; the Apple account is preserved.", 409);
+      }
+    }
+    return this.operation(expectedGeneration, "cursor-progress", async (http, saved, repository, fence) => {
       let session = saved.session;
-      if (!continuation) session = (await this.fetchDirectLists(http, session)).session;
+      if (!continuation) session = appleSuccess((await this.fetchDirectLists(http, session)).session);
       let scan: AllOpenScan;
       if (continuation) {
         if (!session.allOpenScan || session.allOpenScan.token !== continuation) throw new AppError("CONFLICT", "The all-open continuation was replaced or already used. Restart the all-open read.", 409);
@@ -264,10 +331,10 @@ export class AppleConnectionService {
       // single-use even when another instance resumes concurrently.
       await repository.commitResume(fence, { ...session, allOpenScan: scan.listIds.length ? scan : undefined }, "READY");
       return { scan, lists: scan.lists };
-    });
+    }, budget);
   }
-  private async allOpenPage(expectedGeneration: number, token: string, remainingBytes: number, remainingRecords: number) {
-    return this.operation(expectedGeneration, "read", async (http, saved, repository, fence) => {
+  private async allOpenPage(expectedGeneration: number, token: string, remainingBytes: number, remainingRecords: number, budget: AppleRequestBudget) {
+    return this.operation(expectedGeneration, "cursor-progress", async (http, saved, repository, fence) => {
       const session = saved.session; const scan = session.allOpenScan;
       if (!scan || scan.token !== token) throw new AppError("CONFLICT", "The all-open read changed. Restart with the latest continuation.", 409);
       if (scan.expiresAt <= Date.now()) {
@@ -315,15 +382,16 @@ export class AppleConnectionService {
         }
       }
       const complete = next.index >= next.listIds.length;
-      await repository.commitResume(fence, { ...session, allOpenScan: complete ? undefined : next, auth: http.snapshot() }, "READY");
+      await repository.commitResume(fence, appleSuccess({ ...session, allOpenScan: complete ? undefined : next, auth: http.snapshot() }), "READY");
       return { scan: next, records, recordErrors, reason, queried };
-    });
+    }, budget);
   }
   async readAllOpenForMCP(expectedGeneration: number, continuation?: string | null) {
     const token = continuation ?? null;
     if (token !== null && !z.string().uuid().safeParse(token).success) throw new AppError("VALIDATION_ERROR", "The all-open continuation is invalid.", 400);
-    const started = await this.startAllOpenScan(expectedGeneration, token);
+    const budget = appleRequestBudget();
     const until = Date.now() + 20_000;
+    const started = await this.startAllOpenScan(expectedGeneration, token, budget);
     let scan = started.scan;
     const records: Record<string, unknown>[] = [];
     const recordErrors: { id: string | null; code: string }[] = [];
@@ -341,7 +409,7 @@ export class AppleConnectionService {
     if (bytesUsed > 1_048_576) throw new AppError("UNSUPPORTED_FEATURE", "The saved list summaries exceed the all-open response budget. Read individual lists instead.", 409);
     while (scan.index < scan.listIds.length && pagesRead < 20 && records.length < 5000 && Date.now() < until) {
       try {
-        const page = await this.allOpenPage(expectedGeneration, scan.token, 1_048_576 - bytesUsed, 5000 - records.length);
+        const page = await this.allOpenPage(expectedGeneration, scan.token, 1_048_576 - bytesUsed, 5000 - records.length, budget);
         scan = page.scan; if (page.queried) pagesRead++;
         records.push(...page.records); recordErrors.push(...page.recordErrors);
         bytesUsed += new TextEncoder().encode(JSON.stringify({ records: page.records, recordErrors: page.recordErrors })).length;
@@ -382,7 +450,7 @@ export class AppleConnectionService {
     return this.controlledRead(input);
   }
   private async controlledRead(input: z.infer<typeof ControlledRead>) {
-    return this.operation(input.expectedGeneration, "read", async (http, saved, repository, fence) => {
+    return this.operation(input.expectedGeneration, input.action === "saved-lists" ? "snapshot" : input.action === "reminders" && input.continuation ? "cursor-progress" : "read-only", async (http, saved, repository, fence) => {
       const client = new CloudKitRemindersClient(http.http, saved.session.connection);
       let result: unknown;
       let connection = saved.session.connection;
@@ -417,8 +485,8 @@ export class AppleConnectionService {
         result = { records, recordErrors: found.recordErrors.map(error => ({ id: error.recordName, code: error.serverErrorCode })), complete: found.complete, paginationComplete: true, continuation: null, pendingReason: found.complete ? null : "record_errors", scope: "controlled-lookup", auxiliaryRecordCounts: {}, auxiliaryDetailsIncluded: false, unrefreshedLists: input.action === "refresh-saved-lists" ? Math.max(0, saved.session.savedLists!.length - listIds.length) : 0 };
       } else if (input.action === "reminders-batch") {
         // Drain every request while this operation still owns the lease and jar.
-        // An authentication rejection must invalidate the session even if a
-        // different request reports an ordinary upstream error first.
+        // Prefer authentication recovery over an ordinary upstream error, but
+        // do not equate a resource rejection with confirmed account revocation.
         await this.authorizeLists(client, input.listIds);
         connection = { ...connection, remindersZoneOwner: client.remindersZoneOwner };
         const pages = await Promise.allSettled(input.listIds.map(listId => client.queryRemindersPage({ listId, includeCompleted: input.includeCompleted, limit: input.limit })));
@@ -437,7 +505,8 @@ export class AppleConnectionService {
       }
       // Cookie changes and the response share a generation/version fence. A
       // concurrent disconnect prevents both the save and a successful response.
-      await repository.commitResume(fence, { ...saved.session, connection, savedLists, auth: http.snapshot() }, "READY");
+      const session = { ...saved.session, connection, savedLists, auth: http.snapshot() };
+      await repository.commitResume(fence, input.action === "saved-lists" ? session : appleSuccess(session), "READY");
       result = { ...(result as Record<string, unknown>), requestTrace: client.readTrace };
       return { result, generation: fence.generation, liveReadValidated: false, writesEnabled: appleGates(this.env).enabled };
     });

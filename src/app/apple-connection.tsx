@@ -15,6 +15,14 @@ interface Status {
   capabilities?: { complete: boolean; reopen: boolean; delete: boolean };
   action: string | null;
   expiresAt: number | null;
+  retentionDays: number | null;
+  retentionSource: string | null;
+  lastValidatedAt: number | null;
+  lastAppleSuccessAt: number | null;
+  lastRenewedAt: number | null;
+  nextRetryAt: number | null;
+  requiredAction: string | null;
+  message: string;
   gates: { enabled: boolean; cryptographyReviewed: boolean; liveConnectionApproved: boolean };
 }
 class ConnectionError extends Error {
@@ -23,7 +31,7 @@ class ConnectionError extends Error {
 async function call<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
     cache: "no-store",
-    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15_000)]) : AbortSignal.timeout(15_000),
+    signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(45_000)]) : AbortSignal.timeout(45_000),
     ...(body === undefined ? {} : { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
   });
   const value = await response.json() as { error?: { message?: string; code?: string } };
@@ -91,7 +99,7 @@ export default function AppleConnection() {
       failures: previous.generation === status.generation ? previous.failures : 0, lastAttemptAt: Date.now(), paused: false,
     }));
     try {
-      await call(path, { expectedGeneration: status.generation }, controller.signal);
+      await call(path, { expectedGeneration: status.generation, ...(path === "/api/auth/resume" && !automatic ? { restartApproval: true } : {}) }, controller.signal);
       if (controller.signal.aborted) return;
       if (path === "/api/auth/resume") setApproval(previous => ({ ...previous, failures: 0 }));
       await refresh();
@@ -139,11 +147,15 @@ export default function AppleConnection() {
     }, Math.max(0, nextCheck - Date.now()));
     return () => clearTimeout(timer);
   }, [status, expired, refreshing, busyAction, approval, approvalPaused, action]);
-  const ready = !!status?.gates.enabled && status.state === "READY" && status.transportReady && !expired;
+  const needsVerification = status?.requiredAction === "verify-device" || status?.requiredAction === "apple-sign-in";
+  const termsRequired = status?.requiredAction === "review-terms";
+  const coolingDown = !!status?.nextRetryAt && status.nextRetryAt > now;
+  const localExpired = expired || status?.requiredAction === "local-retention-expired";
+  const ready = !!status?.gates.enabled && status.state === "READY" && status.transportReady && !expired && !needsVerification && !termsRequired && !coolingDown;
   const pending = status?.state === "DEVICE_APPROVAL_PENDING" && !expired;
   const busy = refreshing || busyAction !== null;
-  const title = !status ? (error ? "Connection unavailable" : "Checking your connection…") : expired ? "Connect again to continue" : ready ? "Apple account connected" : pending ? "Approve access on your Apple device" : !status.gates.enabled ? "Apple connection is paused" : "Connect your Apple account";
-  const description = !status ? (error ? "Your connection status could not be loaded. Refresh to try again." : "We’re checking whether your Apple account is connected.") : expired ? "Your Apple session has ended. Connect again to refresh your lists and reminders." : ready ? "You’re ready to find your lists and manage your reminders." : pending ? (status.action === "wait-for-reminders-keys" ? "Your device approval was accepted. Apple is preparing access to your reminders." : "Allow web access when Apple asks on your trusted device. We’ll check approval automatically while this page is open.") : !status.gates.enabled ? "The Apple connection is currently unavailable. You can check again here when it’s enabled." : "Connect once, then use ChatGPT or this page to check your reminders.";
+  const title = !status ? (error ? "Connection unavailable" : "Checking your connection…") : localExpired ? "Local connection window expired" : status.requiredAction === "apple-sign-in" ? "Apple sign-in required" : needsVerification ? "Apple verification required" : termsRequired ? "Review Apple terms" : coolingDown ? "Connection temporarily unavailable" : ready ? "Apple account connected" : pending ? "Approve access on your Apple device" : !status.gates.enabled ? "Apple connection is paused" : "Connect your Apple account";
+  const description = !status ? (error ? "Your connection status could not be loaded. Refresh to try again." : "We’re checking whether your Apple account is connected.") : localExpired ? "The fixed application retention window ended. A new sign-in creates a new window." : needsVerification || termsRequired || coolingDown ? status.message : ready ? "You’re ready to find your lists and manage your reminders." : pending ? (status.action === "wait-for-reminders-keys" ? "Your device approval was accepted. Apple is preparing access to your reminders." : "Allow web access when Apple asks on your trusted device. We’ll check approval automatically while this page is open.") : !status.gates.enabled ? "The Apple connection is currently unavailable. You can check again here when it’s enabled." : "Connect once, then use ChatGPT or this page to check your reminders.";
   const checks = [
     { label: "Workspace signed in", checked: true },
     { label: "Apple account connected", checked: ready },
@@ -158,7 +170,8 @@ export default function AppleConnection() {
         <details className="testing-panel"><summary>Workspace setup</summary><div className="testing-content"><p>Copy this setup identity for the person configuring your workspace.</p><label htmlFor="site-identity">Your Site identity</label><input id="site-identity" value={ownerIdentity} readOnly /><div className="action-row"><Button variant="outline" onClick={() => void navigator.clipboard.writeText(ownerIdentity).then(() => setCopied(true)).catch(() => setError("Copy didn’t work. Select the setup identity and copy it manually."))}><Copy size={16} aria-hidden="true" />{copied ? "Copied" : "Copy Site identity"}</Button><Button variant="ghost" disabled={busy} onClick={() => void refresh()}>Check setup</Button></div></div></details>
       </section> : <section className="dashboard-card" aria-labelledby="connection-title">
         <div className="card-heading"><div className="card-icon"><Cloud size={23} aria-hidden="true" /></div><div><h2 id="connection-title">{title}</h2><p>{description}</p></div></div>
-        {ready ? <div className="account-banner"><ShieldCheck size={20} aria-hidden="true" /><span>You can create, edit, complete, reopen and delete reminders with ChatGPT.</span></div> : pending ? <div className="action-row"><Button className="action-primary" disabled={busy || now < (status?.nextAttemptAt ?? 0)} onClick={() => void action("/api/auth/resume")}><RefreshCw size={17} className={busyAction ? "animate-spin" : undefined} aria-hidden="true" />{busyAction ? "Checking approval…" : "Check Apple approval"}</Button><p className="fine-print" role="status">{approvalPaused ? "Automatic approval checks are paused. Check again manually or reconnect Apple if approval is still pending." : "We’re checking Apple approval automatically. You can also check now."}</p></div> : status?.gates.enabled && <><a className="button-link action-primary" href="/connect/apple" target="_top">{status.state === "CONNECTING" ? "Continue Apple sign-in" : "Connect Apple account"}<ArrowRight size={17} aria-hidden="true" /></a><div className="notice"><Info size={17} className="notice-icon" aria-hidden="true" /><p>This uses an unofficial iCloud connection. On the next page, this app processes your Apple password to sign in and Apple verifies your device.</p></div></>}
+        {ready ? <div className="account-banner"><ShieldCheck size={20} aria-hidden="true" /><span>You can create, edit, complete, reopen and delete reminders with ChatGPT.</span></div> : termsRequired || coolingDown ? <p className="fine-print" role="status">Your encrypted connection is preserved. {status?.nextRetryAt ? `Retry after ${dateText(status.nextRetryAt)}.` : "Resolve the required action through Apple's official interface."}</p> : pending ? <div className="action-row"><Button className="action-primary" disabled={busy || now < (status?.nextAttemptAt ?? 0)} onClick={() => void action("/api/auth/resume")}><RefreshCw size={17} className={busyAction ? "animate-spin" : undefined} aria-hidden="true" />{busyAction ? "Checking approval…" : "Check Apple approval"}</Button><p className="fine-print" role="status">{approvalPaused ? "Automatic approval checks are paused. Check again manually to start a new bounded attempt; your Apple account is preserved." : "We’re checking Apple approval automatically. You can also check now."}</p></div> : status?.gates.enabled && <><a className="button-link action-primary" href="/connect/apple" target="_top">{status.state === "CONNECTING" ? "Continue Apple sign-in" : "Connect Apple account"}<ArrowRight size={17} aria-hidden="true" /></a><div className="notice"><Info size={17} className="notice-icon" aria-hidden="true" /><p>This uses an unofficial iCloud connection. On the next page, this app processes your Apple password to sign in and Apple verifies your device.</p></div></>}
+        {status?.retentionSource === "owner-authorised-migration" && <p className="fine-print">Your saved connection now uses a {status.retentionDays}-day session window. No new Apple sign-in was needed for this update.</p>}
         <div className="action-row"><Button variant="outline" disabled={busy || readState.busy} onClick={() => void refresh()}><RefreshCw size={16} className={refreshing ? "animate-spin" : undefined} aria-hidden="true" />{refreshing ? "Checking connection…" : "Refresh connection"}</Button></div>
       </section>}
       {error && !ownerIdentity && <p className="connection-error notice notice-warning" role="alert">{error}</p>}
@@ -170,7 +183,8 @@ export default function AppleConnection() {
     <aside className="status-sidebar" aria-labelledby="status-title">
       <section className="dashboard-card"><div className="card-heading"><h2 id="status-title">Connection status</h2><span className={`status-pill ${ready ? "is-connected" : pending ? "is-pending" : "is-disconnected"}`}>{ready ? "Connected" : pending ? "Needs approval" : status ? "Not connected" : error ? "Unavailable" : "Checking"}</span></div>
         <ul className="status-checklist">{checks.map(item => <li key={item.label} className={item.checked ? "is-complete" : "is-pending"}><input type="checkbox" checked={item.checked} disabled aria-label={item.label} /><span>{item.label}</span></li>)}</ul>
-        <div className="status-divider" /><dl className="status-metrics">{status?.expiresAt && !expired && <div><dt>Session until</dt><dd>{dateText(status.expiresAt)}</dd></div>}</dl>
+        <div className="status-divider" /><dl className="status-metrics">{status?.expiresAt && !expired && <div><dt>Connection allowed until</dt><dd>{dateText(status.expiresAt)}</dd></div>}{status?.lastValidatedAt && <div><dt>Last session check</dt><dd>{dateText(status.lastValidatedAt)}</dd></div>}{status?.lastAppleSuccessAt && <div><dt>Last Apple operation</dt><dd>{dateText(status.lastAppleSuccessAt)}</dd></div>}{status?.lastRenewedAt && <div><dt>Last token renewal</dt><dd>{dateText(status.lastRenewedAt)}</dd></div>}</dl>
+        {status?.expiresAt && !expired && <p className="fine-print">Apple may require verification before this date. Status polling does not contact Apple.</p>}
         <p className="fine-print">{ready ? "Use Refresh lists above for current Apple data. This panel reads the saved list snapshot." : "Connect Apple to read your reminders."}</p>
         {status && ["READY", "DEVICE_APPROVAL_PENDING", "CONNECTING"].includes(status.state) && <div className="account-actions"><AlertDialog><AlertDialogTrigger asChild><Button variant="outline" className="disconnect-button" disabled={busy}><Unplug size={16} aria-hidden="true" />Disconnect Apple account</Button></AlertDialogTrigger><AlertDialogContent className="dialog-card"><AlertDialogHeader><AlertDialogTitle>Disconnect Apple account?</AlertDialogTitle><AlertDialogDescription>This removes the saved Apple connection and list snapshot from this workspace. You can connect again any time.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter className="dialog-actions"><AlertDialogCancel>Keep connected</AlertDialogCancel><AlertDialogAction className="disconnect-button" onClick={() => void action("/api/auth/disconnect")}>Disconnect Apple account</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialog></div>}
       </section>

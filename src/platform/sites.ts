@@ -7,6 +7,10 @@ export interface RuntimeEnv {
   ENCRYPTION_KEYS_JSON?: string;
   LIVE_APPLE_CONNECTION_APPROVED?: string;
   APPLE_CRYPTO_REVIEW_APPROVED?: string;
+  APPLE_SESSION_RETENTION_WRITES?: string;
+  APPLE_SESSION_RETENTION_MIGRATION_JSON?: string;
+  APPLE_SESSION_RENEWAL_ENABLED?: string;
+  APPLE_SESSION_CHECK_INTERVAL_MS?: string;
 }
 export function requireOwner(request: Request, env: RuntimeEnv): string {
   // The Sites dispatcher or standalone Access adapter must authenticate and

@@ -44,7 +44,10 @@ const worker = new Miniflare({
     { name: "local-reminders-app", modulesRoot: serverRoot,
       modules: [entrypoint, ...paths.filter(p => p !== entrypoint)].map(path => ({ type: "ESModule", path })),
       compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
-      bindings: { APP_ORIGIN: origin, REMINDERS_OWNER_ID: keys.owner, ENCRYPTION_KEY_ID: "local-live", ENCRYPTION_KEYS_JSON: JSON.stringify({ "local-live": keys.key }), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2" },
+      bindings: { APP_ORIGIN: origin, REMINDERS_OWNER_ID: keys.owner, ENCRYPTION_KEY_ID: "local-live", ENCRYPTION_KEYS_JSON: JSON.stringify({ "local-live": keys.key }), LIVE_APPLE_CONNECTION_APPROVED: "controlled-device-v2", APPLE_CRYPTO_REVIEW_APPROVED: "device-proof-v2",
+        APPLE_SESSION_RETENTION_WRITES: process.env.APPLE_SESSION_RETENTION_WRITES ?? "",
+        APPLE_SESSION_RENEWAL_ENABLED: process.env.APPLE_SESSION_RENEWAL_ENABLED ?? "",
+        APPLE_SESSION_CHECK_INTERVAL_MS: process.env.APPLE_SESSION_CHECK_INTERVAL_MS ?? "21600000" },
       d1Databases: { DB: "isolated-local-icloud" },
       assets: { directory: join(root, "dist/client"), routerConfig: { has_user_worker: true } },
       outboundService: async request => {

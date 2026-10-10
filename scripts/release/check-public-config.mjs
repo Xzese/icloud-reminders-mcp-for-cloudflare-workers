@@ -38,6 +38,9 @@ export async function checkPublic(directory = root) {
     if (error.code !== "ENOENT") throw error;
   }
   const worker = parse(await readFile(path.join(directory, "wrangler.toml"), "utf8"));
+  for (const setting of ["APPLE_SESSION_RETENTION_WRITES", "APPLE_SESSION_RETENTION_MIGRATION_JSON", "APPLE_SESSION_RENEWAL_ENABLED"]) {
+    if (worker.vars?.[setting] !== "") throw new Error("Public retention and renewal rollout settings must remain disabled and contain no owner approval.");
+  }
   if (worker.d1_databases?.[0]?.database_id !== "replace-with-your-d1-database-id" || worker.vars?.REMINDERS_OWNER_ID !== "" || worker.vars?.LIVE_APPLE_CONNECTION_APPROVED !== "" || worker.vars?.APPLE_CRYPTO_REVIEW_APPROVED !== "" || "LIVE_APPLE_WRITES_APPROVED" in (worker.vars ?? {}) || "ENCRYPTION_KEYS_JSON" in (worker.vars ?? {})) throw new Error("Public Worker configuration must retain placeholders, empty owner/approval gates and no encryption secret.");
   const forbidden = [
     /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,

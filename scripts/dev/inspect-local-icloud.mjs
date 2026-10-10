@@ -15,14 +15,17 @@ const cookie = await new Promise((resolve, reject) => {
   request.setTimeout(3000, () => request.destroy(new Error("Local dashboard timed out."))); request.on("error", reject);
 });
 const call = async (path, body, signal) => {
-  const requestTimeout = path === "/mcp" ? 40_000 : body?.action === "current-lists" ? 28_000 : 15_000;
+  const requestTimeout = path === "/mcp" || path === "/api/apple/read" ? 45_000 : 15_000;
   const response = await fetch(origin + path, { headers: { cookie, ...(body ? { origin, "content-type": "application/json", accept: "application/json, text/event-stream" } : {}) }, ...(body ? { method: "POST", body: JSON.stringify(body) } : {}), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(requestTimeout)]) : AbortSignal.timeout(requestTimeout) });
   const value = await response.json();
   if (!response.ok) { console.log(JSON.stringify({ httpStatus: response.status, error: value.error })); throw new Error("Read-only local diagnostic failed."); }
   return value;
 };
 const status = await call("/api/connection");
-console.log(JSON.stringify({ operation: "status", state: status.state, generation: status.generation, transportReady: status.transportReady, action: status.action, writesEnabled: status.gates.writesEnabled }));
+console.log(JSON.stringify({ operation: "status", state: status.state, generation: status.generation, transportReady: status.transportReady, action: status.action, writesEnabled: status.writeEnabled,
+  retentionDays: status.retentionDays, expiresAt: status.expiresAt, retentionSource: status.retentionSource,
+  lastValidatedAt: status.lastValidatedAt, lastAppleSuccessAt: status.lastAppleSuccessAt, lastRenewedAt: status.lastRenewedAt,
+  nextRetryAt: status.nextRetryAt, requiredAction: status.requiredAction }));
 if (command === "status") process.exit(0);
 if (status.state !== "READY") throw new Error("The Apple connection is not ready for a controlled read.");
 if (command === "write-shapes") {

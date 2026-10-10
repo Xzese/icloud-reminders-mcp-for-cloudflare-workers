@@ -28,7 +28,8 @@ export class AppleSignInFlow {
   private revision = 0;
   readonly http: AppleAuthHTTP; readonly signal: AbortSignal;
   readonly persist: (session: AppleSession, result: PcsResult) => Promise<void>; readonly connect?: PushConnector;
-  constructor(http: AppleAuthHTTP, signal: AbortSignal, persist: (session: AppleSession, result: PcsResult) => Promise<void>, connect?: PushConnector) { this.http = http; this.signal = signal; this.persist = persist; this.connect = connect; }
+  readonly thirtyDays: boolean;
+  constructor(http: AppleAuthHTTP, signal: AbortSignal, persist: (session: AppleSession, result: PcsResult) => Promise<void>, connect?: PushConnector, thirtyDays = true) { this.http = http; this.signal = signal; this.persist = persist; this.connect = connect; this.thirtyDays = thirtyDays; }
   private alive(revision: number) {
     if (this.signal.aborted || revision !== this.revision) throw new AppError("RESTART_REQUIRED", "This sign-in attempt expired or its connection was lost. Restart sign-in.", 409);
   }
@@ -104,7 +105,7 @@ export class AppleSignInFlow {
     requireNoAppleRejection(trust.body);
     const connection = await this.http.accountLogin(); this.alive(revision);
     const result = await advancePcs(this.http, connection.dsid, freshPcsCheckpoint()); this.alive(revision);
-    const login = loginAssurance();
+    const login = loginAssurance(Date.now(), this.thirtyDays);
     await this.persist({ auth: this.http.snapshot(), connection, pcs: result.checkpoint, login }, result); this.alive(revision);
     this.phase = "done"; this.bridge?.close(); this.bridge = null;
     return { type: "complete", state: result.state, ...(result.state === "DEVICE_APPROVAL_PENDING" ? { action: result.action } : {}), nextAttemptAt: result.checkpoint.nextAttemptAt, expiresAt: login.expiresAt };

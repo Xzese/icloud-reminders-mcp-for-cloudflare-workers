@@ -29,6 +29,31 @@ Worker handles bounded Apple HTTP/WebSocket exchanges, trusted-device verificati
 consent. It stores encrypted session credentials with an absolute local lifetime rather than
 storing the password. The cryptography and protocol are unofficial and need independent review.
 
+The envelope and associated-data schema stay at version 1. Inside it, strict login assurance accepts
+legacy version 2 (exactly 24 hours from verification) and version 3 (`absolute-30d-v1`, exactly 30 days).
+The authentication policy remains `device-only-v2`; retention is not another Apple verification.
+Server-controlled owner/account/generation approval enables a CAS migration before expiry cleanup
+in every loader, including status. It preserves credentials and generation, records separate owner
+approval, re-encrypts with a fresh nonce, advances row version, and reloads the committed fence.
+Active leases defer migration without destructive expiry cleanup. No new D1 table is needed.
+
+`session-renewal.ts` performs request-driven checks under the same exclusive short D1 lease, commits
+them, then releases ownership before reminder preparation. The pinned setup `/validate` body is JSON
+null. Accepted account/trust/service evidence reuses credentials; a recoverable rejection allows one
+saved-token `/accountLogin` exchange, never a password fallback. The six-hour engineering interval is
+configurable. Recent successful reminder operations suppress unnecessary proactive checks; full
+validation, successful operation and exchange times are separate encrypted metadata. Failures retain
+safe state, persist bounded cooldowns/Retry-After and expose required action without raw Apple data.
+Local retention expiry and confirmed account rejection are separate from PCS consent or short cursor
+expiry. Expired PCS attempts require an explicit new bounded approval request, not status prompts.
+
+Renewal and reminder calls share a complete request budget. Client reconstruction uses committed
+cookies and service information. Operation modes distinguish read-only, mutation preparation, cursor
+progress and PCS. Authentication recovery may replay a read-only callback or undispatched preparation
+once; mutation dispatch/confirmation and cursor progress are never replayed. Existing exact lookups,
+idempotency keys, version checks and the final pre-dispatch lease check remain mandatory.
+See [compatible rollout and rollback](session-retention.md).
+
 List discovery uses the private CloudKit `Lists` query without reading history. Singular `List`
 summaries are normalized across bounded continuations and committed only after complete retrieval.
 The encrypted snapshot supports dashboard display; MCP list calls always fetch live data.

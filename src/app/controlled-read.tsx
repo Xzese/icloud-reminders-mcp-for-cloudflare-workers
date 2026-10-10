@@ -6,14 +6,14 @@ import { AppleRecordDetails, ReminderDetails, RelatedRecords } from "./reminder-
 import { mergeListChoices, normalizeLists, selectableList, type ReadPage as Page, type ReadRecord, type RelatedRecord } from "./read-types.ts";
 
 class ReadError extends Error { constructor(message: string, readonly code?: string) { super(message); } }
-const authError = (error: unknown) => error instanceof ReadError && ["NOT_CONNECTED", "REAUTH_REQUIRED", "AUTH_EXPIRED", "VERIFICATION_REQUIRED", "TERMS_ACTION_REQUIRED"].includes(error.code ?? "");
+const authError = (error: unknown) => error instanceof ReadError && ["NOT_CONNECTED", "REAUTH_REQUIRED", "AUTH_EXPIRED", "VERIFICATION_REQUIRED", "TERMS_ACTION_REQUIRED", "DEVICE_APPROVAL_PENDING"].includes(error.code ?? "");
 const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
 async function read<T>(body: unknown, signal?: AbortSignal): Promise<T> {
   const controller = new AbortController();
   const cancel = () => controller.abort(signal?.reason);
   if (signal?.aborted) cancel(); else signal?.addEventListener("abort", cancel, { once: true });
   const action = body && typeof body === "object" && "action" in body ? String(body.action) : "";
-  const timer = setTimeout(() => controller.abort(new DOMException("The read timed out. Try again.", "TimeoutError")), action === "current-lists" ? 28_000 : 10_000);
+  const timer = setTimeout(() => controller.abort(new DOMException("The read timed out. Try again.", "TimeoutError")), action === "saved-lists" ? 10_000 : 45_000);
   try {
     const response = await fetch("/api/apple/read", { method: "POST", cache: "no-store", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
     const value = await response.json() as { error?: { message?: string; code?: string }; result?: T };

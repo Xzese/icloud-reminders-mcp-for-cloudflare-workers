@@ -41,6 +41,6 @@ await mkdir(path.join(root, 'docs'), { recursive: true });
 await writeFile(path.join(root, 'docs/artifact-manifest.json'), JSON.stringify({
   kind: 'local-production-build', compatibilityDate: config.compatibility_date,
   entrypoint: 'dist/server/index.js', sitesCapabilities: hosting.capabilities,
-  appleConnectionImplemented: true, liveAppleValidated: false, liveFlagsConfiguredByBuild: false, schemaVersion: 3, loginPolicy: 'device-only-v2', maxLocalSessionLifetimeMs: 86_400_000, checks: ['local-key-exclusion', 'public-asset-boundary', 'binding-contract'], files: entries,
+  appleConnectionImplemented: true, liveAppleValidated: false, liveFlagsConfiguredByBuild: false, schemaVersion: 3, loginPolicy: 'device-only-v2', supportedLoginAssuranceVersions: [2, 3], retentionPolicy: 'absolute-30d-v1', maxLocalSessionLifetimeMs: 2_592_000_000, checks: ['local-key-exclusion', 'public-asset-boundary', 'binding-contract'], files: entries,
 }, null, 2) + '\n');
 console.log(JSON.stringify({ result: 'passed', files: entries.length, bytes: entries.reduce((sum, x) => sum + x.bytes, 0), manifest: 'docs/artifact-manifest.json', deployed: false }));

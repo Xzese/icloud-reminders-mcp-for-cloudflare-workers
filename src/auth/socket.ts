@@ -2,7 +2,7 @@ import { AppError, publicError } from "../errors.ts";
 import { hex } from "../crypto/bytes.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
 import { AppleSessionRepository } from "../persistence/apple-sessions.ts";
-import { requireAppleEnabled } from "./gates.ts";
+import { appleGates, requireAppleEnabled } from "./gates.ts";
 import { AppleAuthHTTP } from "./apple/http.ts";
 import { AppleSignInFlow } from "./apple/flow.ts";
 import { APPLE_AUTH_PROTOCOL, AUTH_LIFETIME_MS, AuthMessage, StartMessage } from "./apple/protocol.ts";
@@ -26,7 +26,7 @@ export async function appleAuthSocket(request: Request, env: RuntimeEnv, owner: 
   const flow = new AppleSignInFlow(new AppleAuthHTTP(undefined, undefined, abort.signal), abort.signal, async (session, result) => {
     if (abort.signal.aborted || closed()) throw new AppError("RESTART_REQUIRED", "The connection was lost. Restart sign-in.", 409);
     await repository.commit(fence, session, result.state, result.state === "DEVICE_APPROVAL_PENDING" ? result.action : undefined);
-  });
+  }, undefined, appleGates(env).retentionWritesEnabled);
   const clean = () => {
     if (closed()) return;
     const successful = phase === "complete";
