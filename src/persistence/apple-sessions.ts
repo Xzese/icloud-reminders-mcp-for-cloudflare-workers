@@ -6,12 +6,18 @@ import { AppError } from "../errors.ts";
 import type { CloudKitConnection } from "../icloud/cloudkit.ts";
 import type { RuntimeEnv } from "../platform/sites.ts";
 import { validatedAppleURL } from "../transport/apple-http.ts";
-import { LoginAssuranceSchema, requireCurrentLogin, type LoginAssurance } from "../auth/apple/policy.ts";
+import { LoginAssuranceSchema, RETENTION_POLICY, SESSION_RETENTION_MS, requireCurrentLogin, type LoginAssurance } from "../auth/apple/policy.ts";
+import { RenewalCheckpointSchema, type RenewalCheckpoint } from "../auth/apple/session-renewal.ts";
 
 const ACCOUNT = "apple-reminders";
 const RECORD = "apple-session";
 const SETUP_LEASE_MS = 180_000;
 const RESUME_LEASE_MS = 30_000;
+const MigrationApprovalSchema = z.object({
+  migrationId: z.string().min(1).max(100).regex(/^[A-Za-z0-9._-]+$/),
+  owner: z.string().min(1).max(256), account: z.literal(ACCOUNT),
+  generation: z.number().int().nonnegative().safe(),
+}).strict();
 const APPROVAL_ACTIONS = ["approve-device-consent", "wait-for-reminders-keys"] as const;
 const cloudKitURL = z.string().max(2048).url().refine((value) => {
   try {
@@ -86,6 +92,7 @@ export const AppleSessionSchema = z.preprocess(discardRetiredCatalogueState, z.o
   connection: CloudKitConnectionSchema,
   pcs: PcsCheckpointSchema,
   login: LoginAssuranceSchema,
+  renewal: RenewalCheckpointSchema.optional(),
   allOpenScan: AllOpenScanSchema.optional(),
   savedLists: SavedListsSchema.optional(),
   // Optional metadata preserves version-1 encrypted list snapshots.
@@ -96,6 +103,7 @@ export type AppleSession = {
   connection: CloudKitConnection;
   pcs: PcsCheckpoint;
   login: LoginAssurance;
+  renewal?: RenewalCheckpoint;
   allOpenScan?: AllOpenScan;
   savedLists?: SavedList[];
   directListSnapshot?: { updatedAt: number };
@@ -112,6 +120,13 @@ export interface AppleSessionStatus extends SessionFence {
   transportReady: boolean;
   liveReadValidated: false;
   expiresAt: number | null;
+  retentionDays: number | null;
+  retentionSource: "interactive-consent" | "owner-authorised-migration" | "legacy-consent" | null;
+  lastValidatedAt: number | null;
+  lastAppleSuccessAt: number | null;
+  lastRenewedAt: number | null;
+  nextRetryAt: number | null;
+  requiredAction: RenewalCheckpoint["requiredAction"] | "local-retention-expired" | "apple-sign-in";
 }
 
 interface StateRow extends SessionFence {
@@ -156,6 +171,7 @@ export class AppleSessionRepository {
   readonly db: D1DatabaseSession;
   readonly owner: string;
   readonly envelopes: Envelopes;
+  private readonly migration: z.infer<typeof MigrationApprovalSchema> | null;
 
   constructor(env: RuntimeEnv, owner: string, envelopes = configuredEnvelopes(env)) {
     if (!env.DB) throw new AppError("CONFIGURATION_REQUIRED", "Persistent storage has not been provisioned.", 503);
@@ -163,6 +179,15 @@ export class AppleSessionRepository {
     this.db = env.DB.withSession("first-primary");
     this.owner = owner;
     this.envelopes = envelopes;
+    this.migration = null;
+    if (env.APPLE_SESSION_RETENTION_MIGRATION_JSON) {
+      let value: unknown;
+      try { value = JSON.parse(env.APPLE_SESSION_RETENTION_MIGRATION_JSON); }
+      catch { throw new AppError("CONFIGURATION_REQUIRED", "The retention migration approval is invalid.", 503); }
+      const approval = MigrationApprovalSchema.safeParse(value);
+      if (!approval.success || !env.REMINDERS_OWNER_ID || approval.data.owner !== env.REMINDERS_OWNER_ID) throw new AppError("CONFIGURATION_REQUIRED", "The retention migration approval must bind the configured owner, account and generation.", 503);
+      this.migration = approval.data;
+    }
   }
 
   private async ensureRow() {
@@ -181,7 +206,14 @@ export class AppleSessionRepository {
         // earlier status SELECT while a concurrent operation advances the version.
         return { ...saved.fence, state: saved.state, action: saved.action,
           nextAttemptAt: saved.session.pcs.nextAttemptAt, transportReady: saved.state === "READY",
-          liveReadValidated: false, expiresAt: saved.session.login.expiresAt };
+          liveReadValidated: false, expiresAt: saved.session.login.expiresAt,
+          retentionDays: (saved.session.login.expiresAt - saved.session.login.verifiedAt) / 86_400_000,
+          retentionSource: saved.session.login.version === 3 ? saved.session.login.retentionSource : "legacy-consent",
+          lastValidatedAt: saved.session.renewal?.lastValidatedAt ?? null,
+          lastAppleSuccessAt: saved.session.renewal?.lastAppleSuccessAt ?? null,
+          lastRenewedAt: saved.session.renewal?.lastRenewedAt ?? null,
+          nextRetryAt: saved.session.renewal?.nextRetryAt ?? null,
+          requiredAction: saved.session.renewal?.requiredAction ?? (saved.state === "DEVICE_APPROVAL_PENDING" ? "approve-reminders" : null) };
       } catch (error) {
         if (error instanceof AppError && ["REAUTH_REQUIRED", "AUTH_EXPIRED", "NOT_CONNECTED", "CONFLICT"].includes(error.code)) { if (retry >= 2) throw new AppError("CONFLICT", "The Apple session changed. Refresh connection.", 409); return this.status(retry + 1); }
         throw error;
@@ -196,6 +228,9 @@ export class AppleSessionRepository {
       transportReady: false,
       liveReadValidated: false,
       expiresAt: null,
+      retentionDays: null, retentionSource: null, lastValidatedAt: null, lastAppleSuccessAt: null,
+      lastRenewedAt: null, nextRetryAt: null,
+      requiredAction: row?.action === "local-retention-expired" || row?.action === "apple-sign-in" ? row.action : null,
     };
   }
 
@@ -243,16 +278,42 @@ export class AppleSessionRepository {
     return result !== null;
   }
 
-  async invalidate(fence: SessionFence) {
+  async invalidate(fence: SessionFence, reason: "local-retention-expired" | "apple-sign-in" | null = null) {
     const now = Date.now();
-    const result = await this.db.prepare("UPDATE apple_session_state SET generation = generation + 1, version = version + 1, state = 'DISCONNECTED', action = NULL, next_attempt_at = 0, envelope = NULL, transaction_id = NULL, transaction_expires_at = NULL, resume_id = NULL, resume_expires_at = NULL, updated_at = ? WHERE owner_id = ? AND account_id = ? AND generation = ? AND version = ? RETURNING generation")
-      .bind(now, this.owner, ACCOUNT, fence.generation, fence.version).first<{ generation: number }>();
+    const result = await this.db.prepare("UPDATE apple_session_state SET generation = generation + 1, version = version + 1, state = 'DISCONNECTED', action = ?, next_attempt_at = 0, envelope = NULL, transaction_id = NULL, transaction_expires_at = NULL, resume_id = NULL, resume_expires_at = NULL, updated_at = ? WHERE owner_id = ? AND account_id = ? AND generation = ? AND version = ? RETURNING generation")
+      .bind(reason, now, this.owner, ACCOUNT, fence.generation, fence.version).first<{ generation: number }>();
     return result !== null;
   }
 
   private invalidateSnapshot(fence: SessionFence) { return this.invalidate(fence); }
 
   async load() { return this.loadSnapshot(); }
+
+  async migrateOwnerSessionRetention() { return this.loadSnapshot(); }
+
+  private async migrateRetention(row: StateRow, session: AppleSession) {
+    const approval = this.migration;
+    if (!approval || approval.owner !== this.owner || approval.generation !== row.generation || session.login.version !== 2) return false;
+    const now = Date.now();
+    const expiresAt = session.login.verifiedAt + SESSION_RETENTION_MS;
+    if (session.login.verifiedAt > now || now >= expiresAt) return false;
+    if (row.transaction_id !== null || row.transaction_expires_at !== null && row.transaction_expires_at > now ||
+      row.resume_expires_at !== null && row.resume_expires_at > now) throw new AppError("CONFLICT", "The approved retention migration is deferred while a session operation is active. The saved connection is preserved.", 409, true);
+    const login = LoginAssuranceSchema.parse({
+      ...session.login, version: 3, expiresAt, retentionPolicy: RETENTION_POLICY,
+      retentionSource: "owner-authorised-migration", migratedAt: now,
+      previousExpiresAt: session.login.expiresAt, migrationId: approval.migrationId,
+    });
+    const envelope = JSON.stringify(await this.envelopes.encrypt({ ...session, login }, {
+      ownerId: this.owner, accountId: ACCOUNT, generation: row.generation, recordId: RECORD, schemaVersion: 1,
+    }));
+    const committedAt = Date.now();
+    requireCurrentLogin(login, committedAt);
+    const updated = await this.db.prepare("UPDATE apple_session_state SET envelope = ?, version = version + 1, updated_at = ? WHERE owner_id = ? AND account_id = ? AND generation = ? AND version = ? AND state = ? AND envelope = ? AND transaction_id IS NULL AND (transaction_expires_at IS NULL OR transaction_expires_at <= ?) AND (resume_expires_at IS NULL OR resume_expires_at <= ?) RETURNING version")
+      .bind(envelope, committedAt, this.owner, ACCOUNT, row.generation, row.version, row.state, row.envelope, committedAt, committedAt).first<{ version: number }>();
+    if (!updated) throw new AppError("CONFLICT", "The Apple session changed during retention migration. No credentials were replaced.", 409, true);
+    return true;
+  }
 
   private async loadSnapshot(retry = 0, generation?: number): Promise<{ session: AppleSession; fence: SessionFence; state: AppleSessionState; action: ApprovalAction | null }> {
     const row = await this.db.prepare("SELECT generation, version, state, action, next_attempt_at, envelope, transaction_id, transaction_expires_at, resume_id, resume_expires_at FROM apple_session_state WHERE owner_id = ? AND account_id = ?")
@@ -262,7 +323,8 @@ export class AppleSessionRepository {
     }
     if (generation !== undefined && row.generation !== generation) throw new AppError("CONFLICT", "The Apple account connection changed. Refresh status before continuing.", 409, true);
     const fence = { generation: row.generation, version: row.version };
-    if (!row.envelope || row.transaction_id !== null) {
+    if (row.transaction_id !== null) throw new AppError("CONFLICT", "An Apple setup operation is active. The saved session was not changed.", 409, true);
+    if (!row.envelope) {
       await this.invalidateSnapshot(fence);
       throw invalidSession();
     }
@@ -283,8 +345,12 @@ export class AppleSessionRepository {
       await this.invalidateSnapshot(fence);
       throw invalidSession();
     }
+    if (await this.migrateRetention(row, parsed.data)) {
+      // Always restore the committed version; never hand out the old CAS fence.
+      return this.loadSnapshot(retry, fence.generation);
+    }
     try { requireCurrentLogin(parsed.data.login); }
-    catch (error) { await this.invalidateSnapshot(fence); throw error; }
+    catch (error) { await this.invalidate(fence, "local-retention-expired"); throw error; }
     const current = await this.db.prepare("SELECT 1 AS active FROM apple_session_state WHERE owner_id = ? AND account_id = ? AND generation = ? AND version = ? AND state IN ('READY', 'DEVICE_APPROVAL_PENDING')")
       .bind(this.owner, ACCOUNT, fence.generation, fence.version).first<{ active: number }>();
     if (!current) {
@@ -294,7 +360,7 @@ export class AppleSessionRepository {
       throw new AppError("CONFLICT", "The Apple session is busy updating. Retry the request.", 409, true);
     }
     try { requireCurrentLogin(parsed.data.login); }
-    catch (error) { await this.invalidateSnapshot(fence); throw error; }
+    catch (error) { await this.invalidate(fence, "local-retention-expired"); throw error; }
     return { session: parsed.data, fence, state: row.state, action: row.state === "READY" ? null : row.action as ApprovalAction };
   }
 
@@ -353,11 +419,17 @@ export class AppleSessionRepository {
     if (!row) throw new AppError("CONFLICT", "The Apple session changed or the preparation budget expired. Refresh before retrying; no write was sent.", 409, true);
   }
 
+  async claimRenewal(expectedGeneration: number, expectedVersion: number) {
+    const saved = await this.load();
+    return saved.state === "READY" ? this.claimRead(expectedGeneration, expectedVersion) : this.claimResume(expectedGeneration, expectedVersion);
+  }
+
   async commitResume(fence: ResumeFence, session: AppleSession, state: AppleSessionState, action?: ApprovalAction) {
     const parsed = await this.checkedSession(session);
     const saved = await this.load();
     if (saved.fence.generation !== fence.generation || saved.fence.version !== fence.version) throw new AppError("CONFLICT", "The Apple session changed during this operation.", 409);
     if (JSON.stringify(saved.session.login) !== JSON.stringify(parsed.login)) throw new AppError("VALIDATION_ERROR", "An Apple session's verification and expiry cannot be extended by an operation.", 400);
+    if (saved.session.connection.dsid !== parsed.connection.dsid || saved.session.auth.clientId !== parsed.auth.clientId || saved.session.connection.clientId !== parsed.connection.clientId) throw new AppError("VALIDATION_ERROR", "An operation cannot replace the saved Apple account or client identity.", 400);
     const safeAction = connectionAction(state, action);
     const context: EnvelopeContext = { ownerId: this.owner, accountId: ACCOUNT, generation: fence.generation, recordId: RECORD, schemaVersion: 1 };
     const envelope = JSON.stringify(await this.envelopes.encrypt(parsed, context));

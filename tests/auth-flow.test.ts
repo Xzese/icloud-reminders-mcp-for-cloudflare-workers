@@ -199,7 +199,7 @@ test("HSA2 bridge orders step 0 before pushes and step 2/4/validate/done, filter
   assert.equal(complete.type, "complete");
   assert.equal(complete.state, "READY");
   assert.equal(saved().session.login.factor, "trusted-device-spake2");
-  assert.equal(complete.expiresAt - saved().session.login.verifiedAt, 86_400_000);
+  assert.equal(complete.expiresAt - saved().session.login.verifiedAt, 2_592_000_000);
 
   const bridgeRequests = requests.filter(request => request.path.includes("/bridge/step/") || request.path.endsWith("/bridge/code/validate"));
   assert.deepEqual(bridgeRequests.map(request => request.path), [

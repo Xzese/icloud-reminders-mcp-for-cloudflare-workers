@@ -9,6 +9,7 @@ import { Envelopes } from "../../src/crypto/envelopes.ts";
 import { loginAssurance } from "../../src/auth/apple/policy.ts";
 import { randomBytes } from "node:crypto";
 import { verifyReminderWrites } from "./reminder-writes.mjs";
+import { verifySessionRetention } from "./session-retention.mjs";
 const root = resolve(new URL("../..", import.meta.url).pathname);
 const config = JSON.parse(await readFile(join(root, "dist/server/wrangler.json"), "utf8"));
 const directory = await mkdtemp(join(tmpdir(), "reminders-worker-acceptance-"));
@@ -276,7 +277,7 @@ try {
   authBatch.responses.get("List/BATCH-B")(new Response("{}", { status: 421 }));
   const authBatchResponse = await authBatchRead; assert.equal(authBatchResponse.status, 409);
   assert.equal((await authBatchResponse.json()).error.code, "REAUTH_REQUIRED", "Authentication rejection must take precedence over an earlier upstream failure.");
-  const afterAuthBatch = await (await request("/api/connection")).json(); assert.equal(afterAuthBatch.state, "DISCONNECTED");
+  const afterAuthBatch = await (await request("/api/connection")).json(); assert.equal(afterAuthBatch.state, "READY");
   batchScenario = null;
   // Restore the synthetic fixture to retain the existing single-read invalidation journey.
   const restoreBatchSession = await batchEnvelope.decrypt(JSON.parse(beforeAuthBatch.envelope), batchContext);
@@ -286,7 +287,7 @@ try {
   assert.equal(rejectedRead.status, 409);
   assert.equal((await rejectedRead.json()).error.code, "REAUTH_REQUIRED");
   const rejectedStatus = await (await request("/api/connection")).json();
-  assert.equal(rejectedStatus.state, "DISCONNECTED"); assert.equal(rejectedStatus.capabilities.controlledRead, false); assert.equal(rejectedStatus.expiresAt, null);
+  assert.equal(rejectedStatus.state, "READY"); assert.equal(rejectedStatus.capabilities.controlledRead, true); assert.ok(rejectedStatus.expiresAt);
   await request("/api/auth/disconnect", { method: "POST", body: {} });
   assert.equal((await request("/api/apple/read", { method: "POST", body: { action: "reminders", expectedGeneration: empty.generation, listId: "List/SYNTHETIC", includeCompleted: true, limit: 1 } })).status, 409);
   fetchMock.assertNoPendingInterceptors();
@@ -419,6 +420,8 @@ try {
   assert.equal(directMcpScenario.paths["/database/1/com.apple.reminders/production/private/zones/list"], 1);
   console.log(JSON.stringify({ type: "synthetic-performance", liveAppleData: false, measurements: [knownMetric, directListsMetric, directOpenInitialMetric, directOpenResumeMetric].map(({ name, elapsedMs, pathCounts }) => ({ name, elapsedMs, pathCounts })) }));
   const writeAcceptance = await verifyReminderWrites(options);
+  const retentionAcceptance = await verifySessionRetention(options);
+  console.log(JSON.stringify({ result: "passed", checks: retentionAcceptance.checks, liveAppleValidated: false }));
   console.log(JSON.stringify({ result: "passed", runtime: "local-workerd", productionBundle: true, checks: ["owner-denial", "origin-CSRF", "removed-feasibility-surfaces", "stateless-MCP", "nonce-CSP", "gated-auth-no-state", "unverified-Apple-success-rejected", "dedicated-credential-document", "encrypted-session-cold-start", "legacy-envelope-restores-without-disconnect", "removed-history-actions", "saved-lists-display-only-snapshot", "direct-current-lists-pagination", "known-list-exact-authorization", "known-list-read-without-history", "direct-all-open-retry-and-frozen-resume", "all-open-continuation-replay-rejected", "restored-cookie-compound-read", "single-and-batch-list-authorization", "two-list-concurrent-read", "completion-removes-open-reminder", "failed-batch-drains-lease", "batch-auth-invalidation", "disconnect-rejects-read", ...writeAcceptance.checks], liveAppleValidated: false }));
 } finally {
   if (worker) await worker.dispose(); await rm(directory, { recursive: true, force: true });

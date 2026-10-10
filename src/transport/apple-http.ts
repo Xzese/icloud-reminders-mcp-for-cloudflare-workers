@@ -29,14 +29,16 @@ export async function limitedBytes(response: Response, limit = 1_048_576): Promi
 export class AppleHTTP {
   readonly jar: CookieJar;
   readonly send: typeof fetch;
-  constructor(jar = new CookieJar(), send: typeof fetch = fetch) { this.jar = jar; this.send = send.bind(globalThis); }
+  readonly signal?: AbortSignal;
+  constructor(jar = new CookieJar(), send: typeof fetch = fetch, signal?: AbortSignal) { this.jar = jar; this.send = send.bind(globalThis); this.signal = signal; }
   async request(value: string, options: { method?: "GET" | "POST" | "PUT"; headers?: HeadersInit; body?: string; discovered?: boolean; signal?: AbortSignal; followRedirects?: boolean } = {}) {
     let url = validatedAppleURL(value, options.discovered); let method = options.method ?? "GET"; let body = options.body;
     const headers = new Headers(options.headers); headers.delete("cookie"); headers.delete("authorization");
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 8000);
     const cancelled = () => controller.abort();
-    if (options.signal?.aborted) cancelled();
-    else options.signal?.addEventListener("abort", cancelled, { once: true });
+    const signal = options.signal ?? this.signal;
+    if (signal?.aborted) cancelled();
+    else signal?.addEventListener("abort", cancelled, { once: true });
     try {
       for (let hop = 0; hop <= 3; hop++) {
         const currentHeaders = new Headers(headers); const cookie = this.jar.header(url);
@@ -61,6 +63,6 @@ export class AppleHTTP {
     } catch (e) {
       if (e instanceof AppError) throw e;
       throw new AppError("UPSTREAM_UNAVAILABLE", "Apple could not be reached within the request budget.", 503, true);
-    } finally { clearTimeout(timer); options.signal?.removeEventListener("abort", cancelled); }
+    } finally { clearTimeout(timer); signal?.removeEventListener("abort", cancelled); }
   }
 }

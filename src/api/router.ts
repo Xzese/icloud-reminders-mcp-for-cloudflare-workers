@@ -47,7 +47,7 @@ export async function applicationRoute(request: Request, env: RuntimeEnv, creden
         const service = new AppleConnectionService(env, owner);
         if (path === "/api/auth/resume") {
           const parsed = ResumeRequest.safeParse(value); if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Refresh status before checking device approval.");
-          return json(await service.resume(parsed.data.expectedGeneration));
+          return json(await service.resume(parsed.data.expectedGeneration, parsed.data.restartApproval));
         }
         const parsed = ControlledRead.safeParse(value); if (!parsed.success) throw new AppError("VALIDATION_ERROR", "Select a valid controlled Reminders read.");
         return json(await service.read(parsed.data));

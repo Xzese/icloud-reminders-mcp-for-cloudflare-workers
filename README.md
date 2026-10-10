@@ -136,6 +136,10 @@ cryptography and your Access configuration; validate those limits in your deploy
 | `ENCRYPTION_KEYS_JSON` **secret** | JSON key ring, for example `{"primary":"<32-byte base64 key>"}`. |
 | `LIVE_APPLE_CONNECTION_APPROVED` | `controlled-device-v2` enables the operator-approved account test. |
 | `APPLE_CRYPTO_REVIEW_APPROVED` | `device-proof-v2` acknowledges the operator's review of the browser proof protocol. |
+| `APPLE_SESSION_RETENTION_WRITES` | `absolute-30d-v1` enables new 30-day interactive sessions **after** all readers are compatible. Empty keeps the compatibility writer on version 2. |
+| `APPLE_SESSION_RETENTION_MIGRATION_JSON` **private setting** | One-time server approval with `migrationId`, `owner`, `account: "apple-reminders"` and the eligible `generation`. Disabled by default; never obtain scope from a request body. |
+| `APPLE_SESSION_RENEWAL_ENABLED` | `saved-tokens-v1` enables bounded request-driven validation and saved-token exchange, independently of migration. Disabled by default. |
+| `APPLE_SESSION_CHECK_INTERVAL_MS` | Our engineering check interval, default `21600000` (six hours); supported range five minutes–24 hours. Not an Apple validity guarantee. |
 | `TEAM_DOMAIN` | Standalone only: `https://<team>.cloudflareaccess.com`. |
 | `POLICY_AUD` | Standalone only: Access application's audience tag. |
 
@@ -341,9 +345,19 @@ Never send your Apple password, device code, encryption keys or cookies to the c
 6. Confirm the session is ready, then use a reminder MCP tool. Known-list reads verify access and
    fetch reminders directly. List discovery uses the direct query described below.
 
-The local application session expires after at most 24 hours. Reads do not extend it. Apple can
+The approved local application session lasts at most **30 days from the original device verification**:
+`expiresAt = verifiedAt + 2_592_000_000`. Reads, writes and saved-token renewal never extend it. Apple can
 reject it sooner; reconnect when required. Disconnect deletes the encrypted session record,
 list snapshots and reminder continuations. Expired records are cleared on next access, not by a timed purge.
+
+Both strict login-assurance versions remain readable. Legacy version 2 keeps its exact 24-hour
+deadline until the configured owner authorises a generation-scoped migration. Migration changes
+only encrypted retention evidence and the row version; it makes no Apple requests and preserves
+the original verification, credentials and list state. Roll out compatible readers first, migrate,
+remove the one-time approval, then enable renewal and future 30-day sign-ins. See
+[session retention, deployment and compatible rollback](docs/session-retention.md).
+Status exposes the local deadline and separate validation/operation/renewal timestamps, never tokens.
+“Connected” reports restored saved state, not a fresh Apple check or a promise of 30 days of Apple access.
 
 ## Use the dashboard
 

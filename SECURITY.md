@@ -41,7 +41,7 @@ proofs and session material; application APIs must not accept passwords or passw
 The browser page is served by this project, not Apple. A malicious operator or compromised script
 can capture browser input. The Worker operator and its secret store are trusted: AES-GCM storage
 does not prevent them from decrypting sessions. Apple's remembered-browser trust can outlast the
-application's local 24-hour session limit.
+application's fixed local retention window (30 days under the approved policy).
 
 ## Security invariants
 
@@ -53,6 +53,21 @@ application's local 24-hour session limit.
   to SMS, voice or legacy authentication. Reject missing, mismatched or replayed protocol proofs.
 - Keep the absolute session lifetime bounded. Reads must not extend it. Disconnect must clear
   stored session state; expiry must reject reads and clear expired records on access.
+- Keep strict legacy 24-hour assurance validation separate from the 30-day retention version.
+  Only a server-approved configured-owner/account/generation migration may extend a retained
+  legacy record, before old expiry cleanup. Preserve verification, factor and original consent.
+  Bind the new deadline to original verification, not migration time. Never restore a disconnected
+  envelope, change Apple cookie expiry, or rotate away its required decryption key.
+- Fence migration and saved-token renewal against active setup/operation leases and disconnect.
+  Re-encrypt with a fresh nonce and increment row version without changing session generation.
+  Ordinary commits must preserve the complete login-assurance object and account/client identity.
+- Validate trusted-session evidence, account identity and allowlisted services before saving
+  renewed credentials. No password, verification bypass or automatic Apple terms acceptance is
+  allowed. Honor Retry-After and persist cooldowns. Only confirmed account authentication rejection
+  invalidates credentials; resource permission, transient and unknown-protocol failures do not.
+- Complete renewal before acquiring mutation preparation leases. Record dispatch before transport,
+  retain the final write-lease check, and never recover/replay a submitted mutation or an acknowledged
+  pagination callback. A safe preparation retry must repeat exact lookups and change-tag checks.
 - Authorize known list IDs with a current exact private-zone lookup; encrypted saved summaries
   alone are never proof of access. Reject wrong zone/owner, deleted lists and groups before content
   reads. Direct discovery is the sole path and must report unsupported or incomplete results

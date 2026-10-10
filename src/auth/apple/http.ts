@@ -20,6 +20,17 @@ export type AuthSnapshot = z.infer<typeof AuthSnapshotSchema>;
 type AuthPath = "" | "/signin/init" | "/signin/complete?isRememberMeEnabled=true" | "/2sv/trust" | "/verify/phone" | "/verify/phone/securitycode" | "/verify/trusteddevice/securitycode" | "/bridge/step/0" | "/bridge/step/2" | "/bridge/step/4" | "/bridge/step/6" | "/bridge/code/validate";
 type SetupPath = "/accountLogin" | "/validate" | "/requestWebAccessState" | "/enableDeviceConsentForPCS" | "/requestPCS";
 export interface AppleReply { status: number; body: Record<string, unknown> | null; text: string; retryAfterMs: number; }
+export class AppleAuthenticationError extends AppError {
+  readonly confirmed: boolean;
+  constructor(confirmed: boolean) {
+    super("REAUTH_REQUIRED", confirmed ? "Apple rejected the saved authentication tokens. Sign in and verify your device again." : "Apple web authentication needs a saved-token check.", 409);
+    this.confirmed = confirmed;
+  }
+}
+export class AppleRetryError extends AppError {
+  readonly retryAfterMs: number;
+  constructor(retryAfterMs: number) { super("RATE_LIMITED", "Apple is limiting requests. Wait until the indicated retry time.", 429, true); this.retryAfterMs = retryAfterMs; }
+}
 export function object(value: unknown): Record<string, unknown> | null { return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null; }
 
 export class AppleAuthHTTP {
@@ -36,10 +47,10 @@ export class AppleAuthHTTP {
       this.clientId = parsed.data.clientId; this.data = parsed.data.headers;
     } else this.clientId = `auth-${crypto.randomUUID()}`;
   }
-  static restore(value: unknown, send: typeof fetch = fetch) {
+  static restore(value: unknown, send: typeof fetch = fetch, signal?: AbortSignal) {
     const parsed = AuthSnapshotSchema.safeParse(value);
     if (!parsed.success) throw new AppError("REAUTH_REQUIRED", "The saved Apple session is invalid. Reconnect through setup.", 409);
-    return new AppleAuthHTTP(new AppleHTTP(new CookieJar(parsed.data.cookies as Cookie[]), send), parsed.data);
+    return new AppleAuthHTTP(new AppleHTTP(new CookieJar(parsed.data.cookies as Cookie[]), send, signal), parsed.data, signal);
   }
   snapshot(): AuthSnapshot { return { clientId: this.clientId, headers: { ...this.data }, cookies: this.http.jar.snapshot() }; }
   value(name: typeof responseHeaders[number]) { return this.data[name]; }
@@ -84,9 +95,9 @@ export class AppleAuthHTTP {
     }
     const delay = response.headers.get("retry-after");
     let retryAfterMs = 30_000;
-    if (delay) { const seconds = Number(delay); const time = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(delay) - Date.now(); if (Number.isFinite(time)) retryAfterMs = Math.max(5000, Math.min(300_000, time)); }
+    if (delay) { const seconds = Number(delay); const time = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(delay) - Date.now(); if (Number.isFinite(time)) retryAfterMs = Math.max(5000, Math.min(8_640_000_000_000_000 - Date.now(), time)); }
     const reply = { status: response.status, body: object(parsed), text, retryAfterMs };
-    if (response.status === 429) throw new AppError("RATE_LIMITED", "Apple is limiting requests. Retry setup after the indicated wait.", 429, true);
+    if (response.status === 429 || response.status >= 500 && delay) throw new AppleRetryError(retryAfterMs);
     const errors = reply.body?.serviceErrors;
     if (Array.isArray(errors) && errors.some(error => object(error)?.code === -20209)) throw new AppError("UNSUPPORTED_AUTH", "Apple has locked this account. Resolve the account condition through Apple before reconnecting.", 422);
     return reply;
@@ -97,10 +108,50 @@ export class AppleAuthHTTP {
     if (reply.status === 412) throw new AppError("VERIFICATION_REQUIRED", "Apple rejected this verification attempt. Restart sign-in.", 409);
     throw new AppError(reply.status >= 500 ? "UPSTREAM_UNAVAILABLE" : "PROTOCOL_CHANGED", "Apple returned an unsupported response for this step.", reply.status >= 500 ? 503 : 422, reply.status >= 500);
   }
-  async accountLogin() {
+  async validateSession(expectedAccount: string) {
+    const reply = await this.setup("/validate", null);
+    return this.acceptedAccount(reply, expectedAccount, false);
+  }
+  private acceptedAccount(reply: AppleReply, expectedAccount?: string, exchange = true) {
+    const body = reply.body;
+    if (reply.status >= 500) throw new AppError("UPSTREAM_UNAVAILABLE", "Apple session validation is temporarily unavailable.", 503, true);
+    if (body?.termsUpdateNeeded === true) throw new AppError("TERMS_ACTION_REQUIRED", "Review Apple's updated terms in the official iCloud interface before continuing.", 409);
+    if (reply.status === 412 || body?.hsaChallengeRequired === true) throw new AppError("VERIFICATION_REQUIRED", "Apple requires device verification. Use the secure connection form.", 409);
+    if ([401, 421, 450].includes(reply.status)) throw new AppleAuthenticationError(exchange);
+    // A resource permission failure is not evidence that saved tokens are revoked.
+    if (reply.status === 403) throw new AppError("FORBIDDEN", "Apple denied this account setup request. Resolve access through Apple's official interface.", 403);
+    this.expect(reply, [200]);
+    if (!body) throw new AppError("PROTOCOL_CHANGED", "Apple omitted the session validation result.");
+    const explicitRejection = body.authenticated === false || body.valid === false ||
+      ["AUTHENTICATION_REQUIRED", "NOT_AUTHENTICATED", "INVALID_AUTH_TOKEN", "AUTHENTICATION_FAILED"].includes(String(body.serverErrorCode).toUpperCase());
+    if (explicitRejection) throw new AppleAuthenticationError(exchange);
+    try { requireNoAppleRejection(body); }
+    catch (error) {
+      if (!(error instanceof AppError) || error.code !== "VERIFICATION_REQUIRED") throw error;
+      throw new AppError("PROTOCOL_CHANGED", "Apple returned an unsupported session rejection. The saved connection was preserved.");
+    }
+    if (body.hsaTrustedBrowser === false) throw new AppError("VERIFICATION_REQUIRED", "Apple no longer accepts this browser's trusted-session state. Verify your device again.", 409);
+    if (body.hsaTrustedBrowser !== true || body.hsaChallengeRequired !== undefined && typeof body.hsaChallengeRequired !== "boolean" ||
+      body.termsUpdateNeeded !== undefined && typeof body.termsUpdateNeeded !== "boolean") throw new AppError("PROTOCOL_CHANGED", "Apple did not return a supported trusted-session state.");
+    const dsInfo = object(body.dsInfo); const dsid = dsInfo?.dsid;
+    const rawURL = object(object(body.webservices)?.ckdatabasews)?.url;
+    if (!((typeof dsid === "string" && /^\d{1,32}$/.test(dsid)) || (typeof dsid === "number" && Number.isSafeInteger(dsid) && dsid > 0)) || typeof rawURL !== "string") throw new AppError("PROTOCOL_CHANGED", "Apple did not return the required Reminders account services.");
+    if (expectedAccount !== undefined && String(dsid) !== expectedAccount) throw new AppError("PROTOCOL_CHANGED", "Apple returned a different account. No reminder access or account replacement was allowed.");
+    let root: URL; try { root = new URL(rawURL); } catch { throw new AppError("PROTOCOL_CHANGED", "Apple returned an invalid Reminders service."); }
+    if ((root.pathname !== "/" && root.pathname !== "") || root.search || root.hash || root.username || root.password) throw new AppError("PROTOCOL_CHANGED", "Apple returned an unsupported Reminders service path.");
+    let cloudKitURL: string;
+    try { cloudKitURL = validatedAppleURL(`${root.origin}/database/1/com.apple.reminders/production/private`, true).href; }
+    catch (error) {
+      if (!(error instanceof AppError)) throw error;
+      throw new AppError("PROTOCOL_CHANGED", "Apple returned a Reminders service outside the supported allowlist.");
+    }
+    return { dsid: String(dsid), cloudKitURL, clientId: this.clientId, clientBuildNumber: CLIENT_BUILD, clientMasteringNumber: CLIENT_MASTERING };
+  }
+  async accountLogin(expectedAccount?: string) {
     const token = this.value("X-Apple-Session-Token");
     if (!token) throw new AppError("REAUTH_REQUIRED", "Apple did not establish a usable session token. Restart sign-in.", 409);
     const reply = await this.setup("/accountLogin", { accountCountryCode: this.value("X-Apple-ID-Account-Country"), dsWebAuthToken: token, extended_login: true, trustToken: this.value("X-Apple-TwoSV-Trust-Token") ?? "" });
+    if (expectedAccount !== undefined) return this.acceptedAccount(reply, expectedAccount);
     this.expect(reply, [200]);
     const body = reply.body;
     if (body?.termsUpdateNeeded === true) throw new AppError("TERMS_ACTION_REQUIRED", "Review Apple's updated terms in the official iCloud interface before reconnecting.", 409);

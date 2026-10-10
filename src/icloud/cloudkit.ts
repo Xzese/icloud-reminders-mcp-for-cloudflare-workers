@@ -441,9 +441,12 @@ function parseTopLevelError(body: Record<string, unknown>, context: { path: Clou
   const code = typeof body.serverErrorCode === "string" ? body.serverErrorCode : null;
   if (!code) return;
   const normalized = code.toUpperCase();
+  if (["PCS_REQUIRED", "DEVICE_CONSENT_REQUIRED", "WEB_ACCESS_DISABLED"].includes(normalized)) {
+    throw new AppError("DEVICE_APPROVAL_PENDING", "Apple requires Reminders web-access approval. The account session can be preserved.", 409);
+  }
   if (["AUTHENTICATION_REQUIRED", "NOT_AUTHENTICATED", "INVALID_AUTH_TOKEN", "AUTHENTICATION_FAILED"].includes(normalized)) {
     console.warn({ event: "apple-reminders-auth-rejected", ...context, reason: normalized });
-    throw new AppError("REAUTH_REQUIRED", "Apple did not accept the Reminders connection. The stored login has been cleared; reconnect your Apple account.", 409);
+    throw new AppError("REAUTH_REQUIRED", "Apple rejected Reminders authentication. A saved-token check or Apple sign-in may be needed.", 409);
   }
   if (["ACCESS_DENIED", "PERMISSION_FAILURE"].includes(normalized)) {
     throw new AppError("FORBIDDEN", "Apple denied access to the private Reminders zone.", 403);
@@ -512,9 +515,14 @@ export class CloudKitRemindersClient {
     });
     if ([401, 421, 450].includes(response.status)) {
       console.warn({ event: "apple-reminders-auth-rejected", path, upstreamStatus: response.status, hasSessionCookie, reason: "http-auth-rejection" });
-      throw new AppError("REAUTH_REQUIRED", "Apple did not accept the Reminders connection. The stored login has been cleared; reconnect your Apple account.", 409);
+      throw new AppError("REAUTH_REQUIRED", "Apple did not accept Reminders authentication. A saved-token check or Apple sign-in may be required.", 409);
     }
     if (response.status === 403) {
+      let denial: unknown;
+      try { denial = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.bytes)); }
+      catch { throw new AppError("FORBIDDEN", "Apple denied access to the private Reminders zone.", 403); }
+      if (denial && typeof denial === "object" && "serverErrorCode" in denial && typeof denial.serverErrorCode === "string" &&
+        ["PCS_REQUIRED", "DEVICE_CONSENT_REQUIRED", "WEB_ACCESS_DISABLED"].includes(denial.serverErrorCode.toUpperCase())) throw new AppError("DEVICE_APPROVAL_PENDING", "Apple requires Reminders web-access approval. The saved Apple account is preserved.", 409);
       throw new AppError("FORBIDDEN", "Apple denied access to the private Reminders zone.", 403);
     }
     if (response.status === 429) {

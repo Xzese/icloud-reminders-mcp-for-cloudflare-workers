@@ -58,7 +58,7 @@ function reminderRecord(id, { recurrence = false, alarm = false } = {}) {
 function sessionFixture(expired = false) {
   const now = Date.now();
   return {
-    login: loginAssurance(expired ? now - 86_400_001 : now),
+    login: loginAssurance(expired ? now - 2_592_000_001 : now),
     auth: {
       clientId: "synthetic-client",
       headers: { "X-Apple-Session-Token": "synthetic-apple-token" },

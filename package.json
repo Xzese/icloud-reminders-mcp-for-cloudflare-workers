@@ -9,6 +9,7 @@
     "install:ci": "node scripts/setup/install-ci.mjs",
     "dev": "node scripts/build/run-framework.mjs dev",
     "dev:icloud": "node scripts/dev/run-local-icloud.mjs",
+    "session:retention:local": "node scripts/dev/migrate-local-session-retention.mjs",
     "build": "node scripts/build/run-framework.mjs build",
     "start": "node --import ./scripts/lib/sites-env.mjs ./node_modules/wrangler/bin/wrangler.js dev --config dist/server/wrangler.json --local --persist-to .wrangler/state --ip 127.0.0.1 --inspector-port 0",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
